@@ -16,6 +16,11 @@ pub fn main() !void {
     const compositor = try WlCompositor.init(wlClient);
     defer allocator.destroy(compositor);
 
+    const surface = try compositor.createSurface();
+    defer surface.destroy() catch |err| {
+        std.log.err("unable to update server about destroyed surface: {}", .{err});
+    };
+
     while (true) {
         try wlClient.read();
     }
@@ -25,7 +30,7 @@ pub fn main() !void {
 
 const WlObject = struct {
     ptr: *anyopaque,
-    destroying: *const bool,
+    destroying: bool = false,
     handleEvent: ?*const fn (ptr: *anyopaque, event: u16, data: []const u32) std.mem.Allocator.Error!void,
 };
 
@@ -86,8 +91,8 @@ const WlClient = struct {
         };
         const objects = try client.objects.addManyAsArray(3);
         objects[0] = null;
-        objects[1] = .{ .ptr = client, .handleEvent = &handleEvent, .destroying = &false };
-        objects[2] = .{ .ptr = client, .handleEvent = &handleRegistryEvent, .destroying = &false };
+        objects[1] = .{ .ptr = client, .handleEvent = &handleEvent };
+        objects[2] = .{ .ptr = client, .handleEvent = &handleRegistryEvent };
 
         return client;
     }
@@ -126,7 +131,7 @@ const WlClient = struct {
                 // delete_id
                 const did = data[0];
                 if (c.objects.items[did]) |object| {
-                    if (!object.destroying.*) {
+                    if (!object.destroying) {
                         std.log.err("wl_display got delete_id for client object: {} which was not being destroyed!", .{did});
                         return;
                     } else {
@@ -200,12 +205,12 @@ const WlClient = struct {
         wlobject.* = .{
             .ptr = &done,
             .handleEvent = CB.handle,
-            .destroying = &true,
         };
         try d.conn.writeAll(@ptrCast(&msg));
         while (!done) {
             try d.read();
         }
+        wlobject.*.?.destroying = true;
         std.log.debug("wl_display sync() END", .{});
     }
 
@@ -288,7 +293,9 @@ const WlCompositor = struct {
     id: u32,
     client: *WlClient,
 
-    fn init(client: *WlClient) !*WlCompositor {
+    /// Caller is responsible for destroying the memory from the
+    /// client's allocator
+    pub fn init(client: *WlClient) !*WlCompositor {
         // TODO: handle the compositor being removed globaly
         const comp = try client.allocator.create(WlCompositor);
         comp.client = client;
@@ -296,10 +303,53 @@ const WlCompositor = struct {
         try client.bind("wl_compositor", 0, &comp.id, .{
             .ptr = comp,
             .handleEvent = null,
-            .destroying = &false,
         }, null);
 
         std.log.debug("wl_compositor created with id: {}", .{comp.id});
         return comp;
+    }
+
+    /// Caller is responsible for calling destroy() to free the surface memory
+    /// and binding with the server
+    pub fn createSurface(comp: *WlCompositor) !*WlSurface {
+        const surface = try WlSurface.init(comp.client);
+        std.log.debug("wl_compositor creating wl_surface {}", .{surface.id});
+
+        const msg: [3]u32 = .{ comp.id, 12 << 16 | 0, surface.id };
+        try comp.client.conn.writeAll(@ptrCast(&msg));
+
+        return surface;
+    }
+};
+
+const WlSurface = struct {
+    id: u32,
+    client: *WlClient,
+
+    fn init(client: *WlClient) !*WlSurface {
+        const surface = try client.allocator.create(WlSurface);
+        surface.client = client;
+        const wlobj = try client.newId(&surface.id);
+        wlobj.* = .{
+            .ptr = surface,
+            .handleEvent = &handleEvent,
+        };
+
+        return surface;
+    }
+
+    /// Frees the memory and updates the server(compositor)
+    pub fn destroy(s: *WlSurface) !void {
+        std.log.debug("wl_surface {} destroy()", .{s.id});
+        defer s.client.allocator.destroy(s);
+        s.client.objects.items[s.id].?.destroying = true;
+        const msg: [2]u32 = .{ s.id, 8 << 16 | 0 };
+        try s.client.conn.writeAll(@ptrCast(&msg));
+    }
+
+    fn handleEvent(ptr: *anyopaque, event: u16, data: []const u32) !void {
+        _ = data;
+        const s: *WlSurface = @ptrCast(@alignCast(ptr));
+        std.log.warn("wl_surface {} got event {} which is not yet implemented", .{ s.id, event });
     }
 };
