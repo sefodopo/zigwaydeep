@@ -1,21 +1,12 @@
 const std = @import("std");
 
-const WlGlobalEntry = struct {
-    name: u32,
-    interface: []const u8,
-    version: u32,
-    /// Called when the global is removed by the server and should be destroyed
-    object: ?u32,
-};
-
 fn lessThan(_: void, a: u32, b: u32) std.math.Order {
     return std.math.order(a, b);
 }
 
-const NewIdQueue = std.PriorityQueue(u32, void, lessThan);
-
-pub const WlClient = struct {
-    const WlObject = struct {
+pub const Client = struct {
+    const NewIdQueue = std.PriorityQueue(u32, void, lessThan);
+    const Object = struct {
         ptr: *anyopaque,
         handleEvent: ?EventHandler,
         destroying: bool = false,
@@ -23,20 +14,27 @@ pub const WlClient = struct {
         /// the global_remove event is received for the global object.
         remove: ?*const fn (ptr: *anyopaque) void = null,
     };
+    const Global = struct {
+        name: u32,
+        interface: []const u8,
+        version: u32,
+        /// Called when the global is removed by the server and should be destroyed
+        object: ?u32,
+    };
     const EventHandler = *const fn (ptr: *anyopaque, event: u16, data: []const u32) std.mem.Allocator.Error!void;
     const DISPLAY_ID: u32 = 1;
     const REGISTRY_ID: u32 = 2;
     conn: std.net.Stream,
     next_id: u32,
     free_ids: NewIdQueue,
-    objects: std.ArrayList(?WlObject),
+    objects: std.ArrayList(?Object),
     allocator: std.mem.Allocator,
-    globals: std.AutoArrayHashMap(u32, WlGlobalEntry),
+    globals: std.AutoArrayHashMap(u32, Global),
 
     /// The allocator is used to create the client;
     /// it is the callers responsibility to call deinit
     /// to free up the memory allocated.
-    pub fn init(allocator: std.mem.Allocator) !*WlClient {
+    pub fn init(allocator: std.mem.Allocator) !*Client {
         // Open the socket
         const conn = blk: {
             const dir = std.posix.getenv("XDG_RUNTIME_DIR") orelse return error.XdgRuntimeDirNotFound;
@@ -55,14 +53,14 @@ pub const WlClient = struct {
         const reg_msg: [3]u32 = .{ 1, 12 << 16 | 1, 2 };
         try conn.writeAll(@ptrCast(&reg_msg));
 
-        var client = try allocator.create(WlClient);
+        var client = try allocator.create(Client);
         client.* = .{
             .conn = conn,
             .next_id = 3,
             .free_ids = NewIdQueue.init(allocator, {}),
-            .objects = std.ArrayList(?WlObject).init(allocator),
+            .objects = std.ArrayList(?Object).init(allocator),
             .allocator = allocator,
-            .globals = std.AutoArrayHashMap(u32, WlGlobalEntry).init(allocator),
+            .globals = std.AutoArrayHashMap(u32, Global).init(allocator),
         };
         const objects = try client.objects.addManyAsArray(3);
         objects[0] = null;
@@ -73,7 +71,7 @@ pub const WlClient = struct {
     }
 
     /// Frees all the memory created
-    pub fn deinit(d: *WlClient) void {
+    pub fn deinit(d: *Client) void {
         d.objects.deinit();
         var it = d.globals.iterator();
         while (it.next()) |global| {
@@ -85,7 +83,7 @@ pub const WlClient = struct {
     }
 
     fn handleEvent(ptr: *anyopaque, event: u16, data: []const u32) std.mem.Allocator.Error!void {
-        const c: *WlClient = @ptrCast(@alignCast(ptr));
+        const c: *Client = @ptrCast(@alignCast(ptr));
         switch (event) {
             0 => {
                 // error
@@ -123,7 +121,7 @@ pub const WlClient = struct {
     }
 
     fn handleRegistryEvent(ptr: *anyopaque, event: u16, data: []const u32) std.mem.Allocator.Error!void {
-        const c: *WlClient = @ptrCast(@alignCast(ptr));
+        const c: *Client = @ptrCast(@alignCast(ptr));
         switch (event) {
             0 => {
                 // global
@@ -169,7 +167,7 @@ pub const WlClient = struct {
         }
     }
 
-    pub fn sync(d: *WlClient) !void {
+    pub fn sync(d: *Client) !void {
         std.log.debug("wl_display sync() BEGIN", .{});
         var cbid: u32 = undefined;
         var done = false;
@@ -192,12 +190,12 @@ pub const WlClient = struct {
     }
 
     fn newId(
-        d: *WlClient,
+        d: *Client,
         new_id: *u32,
         ptr: *anyopaque,
         handler: ?EventHandler,
     ) !void {
-        const obj = WlObject{
+        const obj = Object{
             .ptr = ptr,
             .handleEvent = handler,
         };
@@ -211,7 +209,7 @@ pub const WlClient = struct {
         try d.objects.append(obj);
     }
 
-    pub fn read(d: *WlClient) !void {
+    pub fn read(d: *Client) !void {
         var header: [2]u32 = undefined;
         var n = try d.conn.readAtLeast(@ptrCast(&header), 8);
         if (n != 8) {
@@ -241,10 +239,10 @@ pub const WlClient = struct {
         }
     }
 
-    fn bind(c: *WlClient, interface: []const u8, version: u32, new_id: *u32, ptr: *anyopaque, event_handler: ?EventHandler, remove: ?*const fn (*anyopaque) void) !void {
+    fn bind(c: *Client, interface: []const u8, version: u32, new_id: *u32, ptr: *anyopaque, event_handler: ?EventHandler, remove: ?*const fn (*anyopaque) void) !void {
         // find global
         var git = c.globals.iterator();
-        const global: *WlGlobalEntry = while (git.next()) |entry| {
+        const global: *Global = while (git.next()) |entry| {
             if (std.mem.startsWith(u8, entry.value_ptr.interface, interface)) {
                 break entry.value_ptr;
             }
@@ -277,16 +275,16 @@ pub const WlClient = struct {
     }
 };
 
-pub const WlCompositor = struct {
+pub const Compositor = struct {
     id: u32,
-    client: *WlClient,
+    client: *Client,
     removed: bool = false,
 
     /// Caller is responsible for destroying the memory from the
     /// client's allocator
-    pub fn init(client: *WlClient) !*WlCompositor {
-        const comp = try client.allocator.create(WlCompositor);
-        comp.* = WlCompositor{
+    pub fn init(client: *Client) !*Compositor {
+        const comp = try client.allocator.create(Compositor);
+        comp.* = Compositor{
             .id = 0,
             .client = client,
         };
@@ -298,15 +296,15 @@ pub const WlCompositor = struct {
     }
 
     fn remove(ptr: *anyopaque) void {
-        const comp: *WlCompositor = @ptrCast(@alignCast(ptr));
+        const comp: *Compositor = @ptrCast(@alignCast(ptr));
         comp.removed = true;
     }
 
     /// Caller is responsible for calling destroy() to free the surface memory
     /// and binding with the server
-    pub fn createSurface(comp: *WlCompositor) !*WlSurface {
+    pub fn createSurface(comp: *Compositor) !*Surface {
         if (comp.removed) return error.ObjectRemoved;
-        const surface = try WlSurface.init(comp.client);
+        const surface = try Surface.init(comp.client);
         std.log.debug("wl_compositor creating wl_surface {}", .{surface.id});
 
         const msg: [3]u32 = .{ comp.id, 12 << 16 | 0, surface.id };
@@ -316,12 +314,12 @@ pub const WlCompositor = struct {
     }
 };
 
-pub const WlSurface = struct {
+pub const Surface = struct {
     id: u32,
-    client: *WlClient,
+    client: *Client,
 
-    pub fn init(client: *WlClient) !*WlSurface {
-        const surface = try client.allocator.create(WlSurface);
+    pub fn init(client: *Client) !*Surface {
+        const surface = try client.allocator.create(Surface);
         surface.client = client;
         try client.newId(&surface.id, surface, &handleEvent);
 
@@ -329,7 +327,7 @@ pub const WlSurface = struct {
     }
 
     /// Frees the memory and updates the server(compositor)
-    pub fn destroy(s: *WlSurface) !void {
+    pub fn destroy(s: *Surface) !void {
         std.log.debug("wl_surface {} destroy()", .{s.id});
         defer s.client.allocator.destroy(s);
         s.client.objects.items[s.id].?.destroying = true;
@@ -339,12 +337,12 @@ pub const WlSurface = struct {
 
     fn handleEvent(ptr: *anyopaque, event: u16, data: []const u32) !void {
         _ = data;
-        const s: *WlSurface = @ptrCast(@alignCast(ptr));
+        const s: *Surface = @ptrCast(@alignCast(ptr));
         std.log.warn("wl_surface {} got event {} which is not yet implemented", .{ s.id, event });
     }
 };
 
-pub const WlShm = struct {
+pub const Shm = struct {
     pub const Format = enum(u32) {
         argb8888 = 0,
         xrgb8888 = 1,
@@ -352,14 +350,14 @@ pub const WlShm = struct {
         _,
     };
     id: u32,
-    client: *WlClient,
+    client: *Client,
     removed: bool = false,
 
     /// Caller must release this object to free used memory
     /// when done with it.
-    pub fn create(client: *WlClient) !*WlShm {
-        const shm = try client.allocator.create(WlShm);
-        shm.* = WlShm{
+    pub fn create(client: *Client) !*Shm {
+        const shm = try client.allocator.create(Shm);
+        shm.* = Shm{
             .id = 0,
             .client = client,
         };
@@ -369,11 +367,11 @@ pub const WlShm = struct {
     }
 
     /// Creates a pool, TODO: update docstring
-    pub fn createPool(shm: *WlShm, size: u32) !*WlShmPool {
-        const pool = try WlShmPool.create(shm.client, size);
+    pub fn createPool(shm: *Shm, size: u32) !*ShmPool {
+        const pool = try ShmPool.create(shm.client, size);
         errdefer pool.destroy();
         if (pool.data.len != size) {
-            std.log.warn("WlShmPool data len {} != size {}", .{ pool.data.len, size });
+            std.log.warn("ShmPool data len {} != size {}", .{ pool.data.len, size });
         }
         const msg = [4]u32{ shm.id, 4 << 20 | 0, pool.id, size };
 
@@ -408,7 +406,7 @@ pub const WlShm = struct {
     }
 
     fn remove(ptr: *anyopaque) void {
-        const shm: *WlShm = @ptrCast(@alignCast(ptr));
+        const shm: *Shm = @ptrCast(@alignCast(ptr));
         shm.removed = true;
         std.log.warn("wl_shm {} removed by server", .{shm.id});
     }
@@ -416,7 +414,7 @@ pub const WlShm = struct {
     /// Destroys the shm and tells the server that the shm
     /// is no longer going to be used anymore. Objects
     /// created via this interface remain unaffected.
-    pub fn release(shm: *WlShm) !void {
+    pub fn release(shm: *Shm) !void {
         std.log.debug("wl_shm {} release()", .{shm.id});
         const msg = [_]u32{ shm.id, 2 << 20 | 1 };
         shm.client.allocator.destroy(shm);
@@ -434,14 +432,14 @@ pub const WlShm = struct {
     }
 };
 
-pub const WlShmPool = struct {
+pub const ShmPool = struct {
     id: u32,
-    client: *WlClient,
+    client: *Client,
     fd: std.posix.fd_t,
     data: []align(std.heap.page_size_min) u8,
 
-    /// Called internally from WlShm.createPool
-    fn create(client: *WlClient, size: u32) !*WlShmPool {
+    /// Called internally from Shm.createPool
+    fn create(client: *Client, size: u32) !*ShmPool {
         // try to allocate and mmap shared memory
         const fd = try std.posix.memfd_create("wl_shm_pool", 0);
         errdefer std.posix.close(fd);
@@ -457,8 +455,8 @@ pub const WlShmPool = struct {
         );
         errdefer std.posix.munmap(data);
 
-        const pool = try client.allocator.create(WlShmPool);
-        pool.* = WlShmPool{
+        const pool = try client.allocator.create(ShmPool);
+        pool.* = ShmPool{
             .id = 0,
             .client = client,
             .fd = fd,
@@ -472,14 +470,14 @@ pub const WlShmPool = struct {
 
     /// Caller owns the buffer which must be destroy()ed.
     pub fn createBuffer(
-        pool: *WlShmPool,
+        pool: *ShmPool,
         offset: u32,
         width: u32,
         height: u32,
         stride: u32,
-        format: WlShm.Format,
-    ) !*WlBuffer {
-        const buf = try WlBuffer.init(pool.client);
+        format: Shm.Format,
+    ) !*Buffer {
+        const buf = try Buffer.init(pool.client);
         errdefer buf.destroy();
 
         const msg = [_]u32{
@@ -498,7 +496,7 @@ pub const WlShmPool = struct {
     }
 
     /// Destroys and frees up the memory
-    pub fn destroy(pool: *WlShmPool) void {
+    pub fn destroy(pool: *ShmPool) void {
         std.posix.munmap(pool.data);
         std.posix.close(pool.fd);
         const msg = [_]u32{ pool.id, 2 << 20 | 1 };
@@ -508,7 +506,7 @@ pub const WlShmPool = struct {
         };
     }
 
-    pub fn resize(pool: *WlShmPool, new_size: u32) !void {
+    pub fn resize(pool: *ShmPool, new_size: u32) !void {
         try std.posix.ftruncate(pool.fd, new_size);
         pool.data = try std.posix.mremap(
             pool.data,
@@ -522,12 +520,12 @@ pub const WlShmPool = struct {
     }
 };
 
-pub const WlBuffer = struct {
+pub const Buffer = struct {
     id: u32,
-    client: *WlClient,
+    client: *Client,
 
-    fn init(client: *WlClient) !*WlBuffer {
-        const buf = try client.allocator.create(WlBuffer);
+    fn init(client: *Client) !*Buffer {
+        const buf = try client.allocator.create(Buffer);
         errdefer client.allocator.destroy(buf);
         buf.* = .{
             .id = 0,
@@ -540,7 +538,7 @@ pub const WlBuffer = struct {
     }
 
     // Destroys and releases the memory
-    pub fn destroy(buf: *WlBuffer) void {
+    pub fn destroy(buf: *Buffer) void {
         const msg = [_]u32{ buf.id, 2 << 20 | 0 };
         buf.client.conn.writeAll(@ptrCast(&msg)) catch |err| {
             std.log.err("wl_buffer: unable to send destroy to server: {}", .{err});
@@ -550,7 +548,7 @@ pub const WlBuffer = struct {
 
     fn handleEvent(ptr: *anyopaque, event: u16, data: []const u32) !void {
         _ = data;
-        const buf: *WlBuffer = @ptrCast(@alignCast(ptr));
+        const buf: *Buffer = @ptrCast(@alignCast(ptr));
         if (event != 0) {
             std.log.err("wl_buffer: {} received unknown event: {}", .{ buf.id, event });
             return;

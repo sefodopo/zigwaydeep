@@ -9,12 +9,12 @@ pub fn main() !void {
     }).init;
     const allocator = gpalloc.allocator();
 
-    var client = try wayland.WlClient.init(allocator);
+    var client = try wayland.Client.init(allocator);
     defer client.deinit();
 
     try client.sync();
 
-    const compositor = try wayland.WlCompositor.init(client);
+    const compositor = try wayland.Compositor.init(client);
     defer allocator.destroy(compositor);
 
     const surface = try compositor.createSurface();
@@ -22,7 +22,7 @@ pub fn main() !void {
         std.log.err("unable to update server about destroyed surface: {}", .{err});
     };
 
-    const shm = try wayland.WlShm.create(client);
+    const shm = try wayland.Shm.create(client);
     defer shm.release() catch |err| {
         std.log.err("unable to release wl_shm from the server: {}", .{err});
     };
@@ -30,7 +30,7 @@ pub fn main() !void {
     const pool = try shm.createPool(300 * 300 * 4);
     defer pool.destroy();
 
-    const buffer = try pool.createBuffer(0, 300, 300, 4, wayland.WlShm.Format.xrgb8888);
+    const buffer = try pool.createBuffer(0, 300, 300, 4, wayland.Shm.Format.xrgb8888);
     defer buffer.destroy();
 
     while (true) {
