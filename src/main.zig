@@ -11,6 +11,11 @@ pub fn main() !void {
     var wlClient = try WlClient.init(allocator);
     defer wlClient.deinit();
 
+    try wlClient.sync();
+
+    const compositor = try WlCompositor.init(wlClient);
+    defer allocator.destroy(compositor);
+
     while (true) {
         try wlClient.read();
     }
@@ -81,7 +86,7 @@ const WlClient = struct {
         };
         const objects = try client.objects.addManyAsArray(3);
         objects[0] = null;
-        objects[1] = .{ .ptr = client, .handleEvent = handleEvent, .destroying = &false };
+        objects[1] = .{ .ptr = client, .handleEvent = &handleEvent, .destroying = &false };
         objects[2] = .{ .ptr = client, .handleEvent = &handleRegistryEvent, .destroying = &false };
 
         return client;
@@ -99,7 +104,7 @@ const WlClient = struct {
         d.allocator.destroy(d);
     }
 
-    fn handleEvent(ptr: *anyopaque, event: u16, data: []const u32) !void {
+    fn handleEvent(ptr: *anyopaque, event: u16, data: []const u32) std.mem.Allocator.Error!void {
         const c: *WlClient = @ptrCast(@alignCast(ptr));
         switch (event) {
             0 => {
@@ -124,6 +129,8 @@ const WlClient = struct {
                     if (!object.destroying.*) {
                         std.log.err("wl_display got delete_id for client object: {} which was not being destroyed!", .{did});
                         return;
+                    } else {
+                        std.log.debug("wl_display delete_id for {} found and freeing id for future use", .{did});
                     }
                 }
                 c.objects.items[did] = null;
@@ -135,7 +142,7 @@ const WlClient = struct {
         }
     }
 
-    fn handleRegistryEvent(ptr: *anyopaque, event: u16, data: []const u32) !void {
+    fn handleRegistryEvent(ptr: *anyopaque, event: u16, data: []const u32) std.mem.Allocator.Error!void {
         const c: *WlClient = @ptrCast(@alignCast(ptr));
         switch (event) {
             0 => {
@@ -176,6 +183,42 @@ const WlClient = struct {
         }
     }
 
+    fn sync(d: *WlClient) !void {
+        std.log.debug("wl_display sync() BEGIN", .{});
+        var cbid: u32 = undefined;
+        const wlobject = try d.newId(&cbid);
+        const msg: [3]u32 = .{ DISPLAY_ID, 12 << 16 | 0, cbid };
+        var done = false;
+        const CB = struct {
+            fn handle(ptr: *anyopaque, event: u16, data: []const u32) !void {
+                _ = event;
+                _ = data;
+                const donesys: *bool = @ptrCast(@alignCast(ptr));
+                donesys.* = true;
+            }
+        };
+        wlobject.* = .{
+            .ptr = &done,
+            .handleEvent = CB.handle,
+            .destroying = &true,
+        };
+        try d.conn.writeAll(@ptrCast(&msg));
+        while (!done) {
+            try d.read();
+        }
+        std.log.debug("wl_display sync() END", .{});
+    }
+
+    fn newId(d: *WlClient, new_id: *u32) !*?WlObject {
+        if (d.free_ids.removeOrNull()) |id| {
+            new_id.* = id;
+            return &d.objects.items[id];
+        }
+        new_id.* = d.next_id;
+        d.next_id += 1;
+        return try d.objects.addOne();
+    }
+
     fn read(d: *WlClient) !void {
         var header: [2]u32 = undefined;
         var n = try d.conn.readAtLeast(@ptrCast(&header), 8);
@@ -204,5 +247,59 @@ const WlClient = struct {
         } else {
             std.log.warn("event received from server for unknown object: {}, event: {}", .{ sender, event });
         }
+    }
+
+    fn bind(c: *WlClient, interface: []const u8, version: u32, new_id: *u32, wl_object: WlObject, destroy: ?*const fn () void) !void {
+        // find global
+        var git = c.globals.iterator();
+        const global: *WlGlobalEntry = while (git.next()) |entry| {
+            if (std.mem.startsWith(u8, entry.value_ptr.interface, interface)) {
+                break entry.value_ptr;
+            }
+        } else {
+            return error.GlobalInterfaceNotSupported;
+        };
+        var vers = version;
+        if (vers == 0) {
+            vers = global.version;
+        }
+        if (global.destroy) |_| {
+            return error.GlobalAlreadyBound;
+        }
+
+        (try c.newId(new_id)).* = wl_object;
+        global.destroy = destroy;
+
+        const int_len = global.interface.len >> 2;
+        const msg_size = 6 + int_len;
+        const msg: []u32 = try c.allocator.alloc(u32, msg_size);
+        msg[0] = REGISTRY_ID;
+        msg[1] = @intCast(msg_size << 20 | 0);
+        msg[2] = global.name;
+        msg[3] = @intCast(interface.len);
+        std.mem.copyForwards(u8, @ptrCast(msg[4..]), global.interface);
+        msg[4 + int_len] = vers;
+        msg[5 + int_len] = new_id.*;
+        try c.conn.writeAll(@ptrCast(msg));
+    }
+};
+
+const WlCompositor = struct {
+    id: u32,
+    client: *WlClient,
+
+    fn init(client: *WlClient) !*WlCompositor {
+        // TODO: handle the compositor being removed globaly
+        const comp = try client.allocator.create(WlCompositor);
+        comp.client = client;
+
+        try client.bind("wl_compositor", 0, &comp.id, .{
+            .ptr = comp,
+            .handleEvent = null,
+            .destroying = &false,
+        }, null);
+
+        std.log.debug("wl_compositor created with id: {}", .{comp.id});
+        return comp;
     }
 };
