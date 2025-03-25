@@ -30,6 +30,9 @@ pub fn main() !void {
     const pool = try shm.createPool(300 * 300 * 4);
     defer pool.destroy();
 
+    const buffer = try pool.createBuffer(0, 300, 300, 4, wayland.WlShm.Format.xrgb8888);
+    defer buffer.destroy();
+
     while (true) {
         try client.read();
     }

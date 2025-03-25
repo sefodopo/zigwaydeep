@@ -349,6 +349,7 @@ pub const WlShm = struct {
         argb8888 = 0,
         xrgb8888 = 1,
         c8 = 0x20203843,
+        _,
     };
     id: u32,
     client: *WlClient,
@@ -469,6 +470,33 @@ pub const WlShmPool = struct {
         return pool;
     }
 
+    /// Caller owns the buffer which must be destroy()ed.
+    pub fn createBuffer(
+        pool: *WlShmPool,
+        offset: u32,
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: WlShm.Format,
+    ) !*WlBuffer {
+        const buf = try WlBuffer.init(pool.client);
+        errdefer buf.destroy();
+
+        const msg = [_]u32{
+            pool.id,
+            8 << 20 | 0,
+            buf.id,
+            offset,
+            width,
+            height,
+            stride,
+            @intFromEnum(format),
+        };
+        try pool.client.conn.writeAll(@ptrCast(&msg));
+
+        return buf;
+    }
+
     /// Destroys and frees up the memory
     pub fn destroy(pool: *WlShmPool) void {
         std.posix.munmap(pool.data);
@@ -478,5 +506,55 @@ pub const WlShmPool = struct {
         pool.client.conn.writeAll(@ptrCast(@alignCast(&msg))) catch |err| {
             std.log.err("wl_shm_pool: unable to send destroy message to server, hope everything is okay: {}", .{err});
         };
+    }
+
+    pub fn resize(pool: *WlShmPool, new_size: u32) !void {
+        try std.posix.ftruncate(pool.fd, new_size);
+        pool.data = try std.posix.mremap(
+            pool.data,
+            0, // will create a mapping with the same pages since it is shared
+            new_size,
+            0,
+            null,
+        );
+        const msg = [_]u32{ pool.id, 3 << 20 | 2, new_size };
+        try pool.client.conn.writeAll(@ptrCast(&msg));
+    }
+};
+
+pub const WlBuffer = struct {
+    id: u32,
+    client: *WlClient,
+
+    fn init(client: *WlClient) !*WlBuffer {
+        const buf = try client.allocator.create(WlBuffer);
+        errdefer client.allocator.destroy(buf);
+        buf.* = .{
+            .id = 0,
+            .client = client,
+        };
+
+        try client.newId(&buf.id, buf, &handleEvent);
+
+        return buf;
+    }
+
+    // Destroys and releases the memory
+    pub fn destroy(buf: *WlBuffer) void {
+        const msg = [_]u32{ buf.id, 2 << 20 | 0 };
+        buf.client.conn.writeAll(@ptrCast(&msg)) catch |err| {
+            std.log.err("wl_buffer: unable to send destroy to server: {}", .{err});
+        };
+        buf.client.allocator.destroy(buf);
+    }
+
+    fn handleEvent(ptr: *anyopaque, event: u16, data: []const u32) !void {
+        _ = data;
+        const buf: *WlBuffer = @ptrCast(@alignCast(ptr));
+        if (event != 0) {
+            std.log.err("wl_buffer: {} received unknown event: {}", .{ buf.id, event });
+            return;
+        }
+        std.log.info("wl_buffer: {} received release() which is not implemented", .{buf.id});
     }
 };
