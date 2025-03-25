@@ -21,6 +21,11 @@ pub fn main() !void {
         std.log.err("unable to update server about destroyed surface: {}", .{err});
     };
 
+    const shm = try WlShm.init(wlClient);
+    defer shm.release() catch |err| {
+        std.log.err("unable to release wl_shm from the server: {}", .{err});
+    };
+
     while (true) {
         try wlClient.read();
     }
@@ -32,6 +37,9 @@ const WlObject = struct {
     ptr: *anyopaque,
     destroying: bool = false,
     handleEvent: ?*const fn (ptr: *anyopaque, event: u16, data: []const u32) std.mem.Allocator.Error!void,
+    /// Should be set for global objects, should not free the memory, called when
+    /// the global_remove event is received for the global object.
+    remove: ?*const fn (ptr: *anyopaque) void = null,
 };
 
 const WlGlobalEntry = struct {
@@ -39,7 +47,7 @@ const WlGlobalEntry = struct {
     interface: []const u8,
     version: u32,
     /// Called when the global is removed by the server and should be destroyed
-    destroy: ?*const fn () void = null,
+    object: ?u32,
 };
 
 fn lessThan(_: void, a: u32, b: u32) std.math.Order {
@@ -168,15 +176,21 @@ const WlClient = struct {
                     .name = name,
                     .interface = interface,
                     .version = version,
+                    .object = null,
                 });
             },
             1 => {
                 // global_remove
                 const name = data[0];
                 if (c.globals.get(name)) |global| {
-                    if (global.destroy) |destroy| {
+                    if (global.object) |objid| {
                         std.log.warn("wl_registry received global_remove for {} which is currently in use, destroying...", .{global.name});
-                        destroy();
+                        if (c.objects.items[objid]) |obj| {
+                            if (obj.remove) |remove| {
+                                remove(obj.ptr);
+                            }
+                        }
+                        c.objects.items[objid] = null;
                     }
                 } else {
                     std.log.err("wl_registry received global_remove for {} which does not exist", .{name});
@@ -254,7 +268,7 @@ const WlClient = struct {
         }
     }
 
-    fn bind(c: *WlClient, interface: []const u8, version: u32, new_id: *u32, wl_object: WlObject, destroy: ?*const fn () void) !void {
+    fn bind(c: *WlClient, interface: []const u8, version: u32, new_id: *u32, wl_object: WlObject) !void {
         // find global
         var git = c.globals.iterator();
         const global: *WlGlobalEntry = while (git.next()) |entry| {
@@ -268,12 +282,12 @@ const WlClient = struct {
         if (vers == 0) {
             vers = global.version;
         }
-        if (global.destroy) |_| {
+        if (global.object) |_| {
             return error.GlobalAlreadyBound;
         }
 
         (try c.newId(new_id)).* = wl_object;
-        global.destroy = destroy;
+        global.object = new_id.*;
 
         const int_len = global.interface.len >> 2;
         const msg_size = 6 + int_len;
@@ -292,26 +306,33 @@ const WlClient = struct {
 const WlCompositor = struct {
     id: u32,
     client: *WlClient,
+    removed: bool = false,
 
     /// Caller is responsible for destroying the memory from the
     /// client's allocator
     pub fn init(client: *WlClient) !*WlCompositor {
-        // TODO: handle the compositor being removed globaly
         const comp = try client.allocator.create(WlCompositor);
         comp.client = client;
 
         try client.bind("wl_compositor", 0, &comp.id, .{
             .ptr = comp,
             .handleEvent = null,
-        }, null);
+            .remove = &remove,
+        });
 
         std.log.debug("wl_compositor created with id: {}", .{comp.id});
         return comp;
     }
 
+    fn remove(ptr: *anyopaque) void {
+        const comp: *WlCompositor = @ptrCast(@alignCast(ptr));
+        comp.removed = true;
+    }
+
     /// Caller is responsible for calling destroy() to free the surface memory
     /// and binding with the server
     pub fn createSurface(comp: *WlCompositor) !*WlSurface {
+        if (comp.removed) return error.ObjectRemoved;
         const surface = try WlSurface.init(comp.client);
         std.log.debug("wl_compositor creating wl_surface {}", .{surface.id});
 
@@ -351,5 +372,54 @@ const WlSurface = struct {
         _ = data;
         const s: *WlSurface = @ptrCast(@alignCast(ptr));
         std.log.warn("wl_surface {} got event {} which is not yet implemented", .{ s.id, event });
+    }
+};
+
+const WlShm = struct {
+    pub const Format = enum(u32) {
+        argb8888 = 0,
+        xrgb8888 = 1,
+        c8 = 0x20203843,
+    };
+    id: u32,
+    client: *WlClient,
+    removed: bool = false,
+
+    /// Caller must release this object to free used memory
+    /// when done with it.
+    pub fn init(client: *WlClient) !*WlShm {
+        const shm = try client.allocator.create(WlShm);
+        shm.client = client;
+        try client.bind("wl_shm", 0, &shm.id, WlObject{
+            .ptr = shm,
+            .handleEvent = handleEvent,
+            .remove = &remove,
+        });
+        return shm;
+    }
+
+    fn remove(ptr: *anyopaque) void {
+        const shm: *WlShm = @ptrCast(@alignCast(ptr));
+        shm.removed = true;
+    }
+
+    /// Destroys the shm and tells the server that the shm
+    /// is no longer going to be used anymore. Objects
+    /// created via this interface remain unaffected.
+    pub fn release(shm: *WlShm) !void {
+        if (shm.removed) return error.ObjectRemoved;
+        const msg = [_]u32{ shm.id, 2 << 20 | 1 };
+        shm.client.allocator.destroy(shm);
+        try shm.client.conn.writeAll(@ptrCast(&msg));
+    }
+
+    fn handleEvent(ptr: *anyopaque, event: u16, data: []const u32) !void {
+        _ = ptr;
+        if (event != 0) {
+            std.log.err("wl_shm got unknown event: {}", .{event});
+            return;
+        }
+        const format: Format = @enumFromInt(data[0]);
+        std.log.info("wl_shm: format supported: {}", .{format});
     }
 };
