@@ -21,10 +21,13 @@ pub fn main() !void {
         std.log.err("unable to update server about destroyed surface: {}", .{err});
     };
 
-    const shm = try WlShm.init(wlClient);
+    const shm = try WlShm.create(wlClient);
     defer shm.release() catch |err| {
         std.log.err("unable to release wl_shm from the server: {}", .{err});
     };
+
+    const pool = try shm.createPool(300 * 300 * 4);
+    defer pool.destroy();
 
     while (true) {
         try wlClient.read();
@@ -32,15 +35,6 @@ pub fn main() !void {
 
     std.log.info("Were there memory leaks: {}", .{gpalloc.deinit()});
 }
-
-const WlObject = struct {
-    ptr: *anyopaque,
-    destroying: bool = false,
-    handleEvent: ?*const fn (ptr: *anyopaque, event: u16, data: []const u32) std.mem.Allocator.Error!void,
-    /// Should be set for global objects, should not free the memory, called when
-    /// the global_remove event is received for the global object.
-    remove: ?*const fn (ptr: *anyopaque) void = null,
-};
 
 const WlGlobalEntry = struct {
     name: u32,
@@ -57,6 +51,15 @@ fn lessThan(_: void, a: u32, b: u32) std.math.Order {
 const NewIdQueue = std.PriorityQueue(u32, void, lessThan);
 
 const WlClient = struct {
+    const WlObject = struct {
+        ptr: *anyopaque,
+        handleEvent: ?EventHandler,
+        destroying: bool = false,
+        /// Should be set for global objects, should not free the memory, called when
+        /// the global_remove event is received for the global object.
+        remove: ?*const fn (ptr: *anyopaque) void = null,
+    };
+    const EventHandler = *const fn (ptr: *anyopaque, event: u16, data: []const u32) std.mem.Allocator.Error!void;
     const DISPLAY_ID: u32 = 1;
     const REGISTRY_ID: u32 = 2;
     conn: std.net.Stream,
@@ -205,8 +208,6 @@ const WlClient = struct {
     fn sync(d: *WlClient) !void {
         std.log.debug("wl_display sync() BEGIN", .{});
         var cbid: u32 = undefined;
-        const wlobject = try d.newId(&cbid);
-        const msg: [3]u32 = .{ DISPLAY_ID, 12 << 16 | 0, cbid };
         var done = false;
         const CB = struct {
             fn handle(ptr: *anyopaque, event: u16, data: []const u32) !void {
@@ -216,26 +217,34 @@ const WlClient = struct {
                 donesys.* = true;
             }
         };
-        wlobject.* = .{
-            .ptr = &done,
-            .handleEvent = CB.handle,
-        };
+        try d.newId(&cbid, &done, &CB.handle);
+        const msg: [3]u32 = .{ DISPLAY_ID, 12 << 16 | 0, cbid };
         try d.conn.writeAll(@ptrCast(&msg));
         while (!done) {
             try d.read();
         }
-        wlobject.*.?.destroying = true;
+        d.objects.items[cbid].?.destroying = true;
         std.log.debug("wl_display sync() END", .{});
     }
 
-    fn newId(d: *WlClient, new_id: *u32) !*?WlObject {
+    fn newId(
+        d: *WlClient,
+        new_id: *u32,
+        ptr: *anyopaque,
+        handler: ?EventHandler,
+    ) !void {
+        const obj = WlObject{
+            .ptr = ptr,
+            .handleEvent = handler,
+        };
         if (d.free_ids.removeOrNull()) |id| {
             new_id.* = id;
-            return &d.objects.items[id];
+            d.objects.items[id] = obj;
+            return;
         }
         new_id.* = d.next_id;
         d.next_id += 1;
-        return try d.objects.addOne();
+        try d.objects.append(obj);
     }
 
     fn read(d: *WlClient) !void {
@@ -268,7 +277,7 @@ const WlClient = struct {
         }
     }
 
-    fn bind(c: *WlClient, interface: []const u8, version: u32, new_id: *u32, wl_object: WlObject) !void {
+    fn bind(c: *WlClient, interface: []const u8, version: u32, new_id: *u32, ptr: *anyopaque, event_handler: ?EventHandler, remove: ?*const fn (*anyopaque) void) !void {
         // find global
         var git = c.globals.iterator();
         const global: *WlGlobalEntry = while (git.next()) |entry| {
@@ -286,7 +295,8 @@ const WlClient = struct {
             return error.GlobalAlreadyBound;
         }
 
-        (try c.newId(new_id)).* = wl_object;
+        try c.newId(new_id, ptr, event_handler);
+        c.objects.items[new_id.*].?.remove = remove;
         global.object = new_id.*;
 
         const int_len = global.interface.len >> 2;
@@ -312,13 +322,12 @@ const WlCompositor = struct {
     /// client's allocator
     pub fn init(client: *WlClient) !*WlCompositor {
         const comp = try client.allocator.create(WlCompositor);
-        comp.client = client;
+        comp.* = WlCompositor{
+            .id = 0,
+            .client = client,
+        };
 
-        try client.bind("wl_compositor", 0, &comp.id, .{
-            .ptr = comp,
-            .handleEvent = null,
-            .remove = &remove,
-        });
+        try client.bind("wl_compositor", 0, &comp.id, comp, null, &remove);
 
         std.log.debug("wl_compositor created with id: {}", .{comp.id});
         return comp;
@@ -350,11 +359,7 @@ const WlSurface = struct {
     fn init(client: *WlClient) !*WlSurface {
         const surface = try client.allocator.create(WlSurface);
         surface.client = client;
-        const wlobj = try client.newId(&surface.id);
-        wlobj.* = .{
-            .ptr = surface,
-            .handleEvent = &handleEvent,
-        };
+        try client.newId(&surface.id, surface, &handleEvent);
 
         return surface;
     }
@@ -387,27 +392,67 @@ const WlShm = struct {
 
     /// Caller must release this object to free used memory
     /// when done with it.
-    pub fn init(client: *WlClient) !*WlShm {
+    pub fn create(client: *WlClient) !*WlShm {
         const shm = try client.allocator.create(WlShm);
-        shm.client = client;
-        try client.bind("wl_shm", 0, &shm.id, WlObject{
-            .ptr = shm,
-            .handleEvent = handleEvent,
-            .remove = &remove,
-        });
+        shm.* = WlShm{
+            .id = 0,
+            .client = client,
+        };
+        try client.bind("wl_shm", 0, &shm.id, shm, &handleEvent, &remove);
+        std.log.debug("wl_shm created and bound to id: {}", .{shm.id});
         return shm;
+    }
+
+    /// Creates a pool, TODO: update docstring
+    pub fn createPool(shm: *WlShm, size: u32) !*WlShmPool {
+        const pool = try WlShmPool.create(shm.client, size);
+        errdefer pool.destroy();
+        if (pool.data.len != size) {
+            std.log.warn("WlShmPool data len {} != size {}", .{ pool.data.len, size });
+        }
+        const msg = [4]u32{ shm.id, 4 << 20 | 0, pool.id, size };
+
+        // use sendmsg to send the file descriptor over...
+        const iov = [_]std.posix.iovec_const{.{
+            .base = @ptrCast(&msg),
+            .len = msg.len,
+        }};
+        const cmsg = std.os.linux.msghdr_const{
+            .name = null,
+            .namelen = 0,
+            .iov = &iov,
+            .iovlen = iov.len,
+            .control = &extern struct {
+                len: usize,
+                level: c_int,
+                type: c_int,
+                data: [@sizeOf(std.posix.fd_t)]u8,
+            }{
+                .len = 1,
+                .level = std.posix.SOL.SOCKET,
+                .type = 1, // SCM_RIGHTS
+                .data = std.mem.toBytes(pool.fd),
+            },
+            .controllen = 1,
+            .flags = 0,
+        };
+        const n = try std.posix.sendmsg(shm.client.conn.handle, &cmsg, std.posix.MSG.OOB);
+        std.log.info("wl_shm create pool send {} bytes", .{n});
+        try shm.client.conn.writeAll(@ptrCast(@alignCast(&msg)));
+        return pool;
     }
 
     fn remove(ptr: *anyopaque) void {
         const shm: *WlShm = @ptrCast(@alignCast(ptr));
         shm.removed = true;
+        std.log.warn("wl_shm {} removed by server", .{shm.id});
     }
 
     /// Destroys the shm and tells the server that the shm
     /// is no longer going to be used anymore. Objects
     /// created via this interface remain unaffected.
     pub fn release(shm: *WlShm) !void {
-        if (shm.removed) return error.ObjectRemoved;
+        std.log.debug("wl_shm {} release()", .{shm.id});
         const msg = [_]u32{ shm.id, 2 << 20 | 1 };
         shm.client.allocator.destroy(shm);
         try shm.client.conn.writeAll(@ptrCast(&msg));
@@ -421,5 +466,53 @@ const WlShm = struct {
         }
         const format: Format = @enumFromInt(data[0]);
         std.log.info("wl_shm: format supported: {}", .{format});
+    }
+};
+
+const WlShmPool = struct {
+    id: u32,
+    client: *WlClient,
+    fd: std.posix.fd_t,
+    data: []align(std.heap.page_size_min) u8,
+
+    /// Called internally from WlShm.createPool
+    fn create(client: *WlClient, size: u32) !*WlShmPool {
+        // try to allocate and mmap shared memory
+        const fd = try std.posix.memfd_create("wl_shm_pool", 0);
+        errdefer std.posix.close(fd);
+        try std.posix.ftruncate(fd, size);
+
+        const data = try std.posix.mmap(
+            null,
+            @intCast(size),
+            std.posix.PROT.READ | std.posix.PROT.WRITE,
+            .{ .TYPE = .SHARED },
+            fd,
+            0,
+        );
+        errdefer std.posix.munmap(data);
+
+        const pool = try client.allocator.create(WlShmPool);
+        pool.* = WlShmPool{
+            .id = 0,
+            .client = client,
+            .fd = fd,
+            .data = data,
+        };
+        errdefer client.allocator.destroy(pool);
+
+        try pool.client.newId(&pool.id, pool, null);
+        return pool;
+    }
+
+    /// Destroys and frees up the memory
+    pub fn destroy(pool: *WlShmPool) void {
+        std.posix.munmap(pool.data);
+        std.posix.close(pool.fd);
+        const msg = [_]u32{ pool.id, 2 << 20 | 1 };
+        pool.client.allocator.destroy(pool);
+        pool.client.conn.writeAll(@ptrCast(@alignCast(&msg))) catch |err| {
+            std.log.err("wl_shm_pool: unable to send destroy message to server, hope everything is okay: {}", .{err});
+        };
     }
 };
