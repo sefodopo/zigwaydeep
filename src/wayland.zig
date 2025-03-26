@@ -280,6 +280,7 @@ pub fn WaylandClient(comptime A: type) type {
                 int_len >>= 2;
                 const msg_size: u32 = 6 + int_len;
                 const msg: []u32 = try c.allocator.alloc(u32, msg_size);
+                defer c.allocator.free(msg);
                 msg[0] = REGISTRY_ID;
                 msg[1] = msg_size << 18 | 0;
                 msg[2] = global.name;
@@ -288,7 +289,6 @@ pub fn WaylandClient(comptime A: type) type {
                 std.mem.copyForwards(u8, @ptrCast(msg[4..]), interface);
                 msg[4 + int_len] = vers;
                 msg[5 + int_len] = new_id.*;
-                std.log.debug("binding with data: {any}", .{@as([]u8, @ptrCast(msg))});
                 try c.conn.writeAll(@ptrCast(msg));
             }
         };
@@ -439,7 +439,6 @@ pub fn WaylandClient(comptime A: type) type {
                     .base = @ptrCast(&msg),
                     .len = 17,
                 };
-                const fds: [1]std.posix.fd_t = .{pool.fd};
                 const CMSGHDR = extern struct {
                     len: usize,
                     level: c_int,
@@ -455,7 +454,7 @@ pub fn WaylandClient(comptime A: type) type {
                 control.level = std.posix.SOL.SOCKET;
                 control.type = 1;
                 const cmsgdata: []u8 = buf[@sizeOf(CMSGHDR)..];
-                std.mem.copyForwards(u8, cmsgdata, @ptrCast(&fds));
+                std.mem.copyForwards(u8, cmsgdata, std.mem.asBytes(&pool.fd));
                 const cmsg = std.os.linux.msghdr_const{
                     .name = null,
                     .namelen = 0,
@@ -768,6 +767,7 @@ pub fn WaylandClient(comptime A: type) type {
         pub const XdgToplevel = struct {
             id: u32,
             client: *Client,
+            closeHandler: ?*const fn (ptr: *A) void = null,
 
             fn create(client: *Client) !*XdgToplevel {
                 const tl = try client.allocator.create(XdgToplevel);
@@ -797,6 +797,7 @@ pub fn WaylandClient(comptime A: type) type {
                 }
                 ntl >>= 2;
                 const msg = try tl.client.allocator.alloc(u32, 3 + ntl);
+                defer tl.client.allocator.free(msg);
                 msg[0] = tl.id;
                 msg[1] = @intCast(msg.len << 18 | 2);
                 msg[2] = @intCast(new_title.len + 1);
@@ -821,12 +822,111 @@ pub fn WaylandClient(comptime A: type) type {
                 const tl: *XdgToplevel = @ptrCast(@alignCast(ptr));
                 const ev = switch (event) {
                     0 => "configure",
-                    1 => "close",
+                    1 => {
+                        if (tl.closeHandler) |ch| {
+                            ch(tl.client.app);
+                        } else {
+                            std.log.warn("xdg_toplevel: {} received close event that isn't handled", .{tl.id});
+                        }
+                        return;
+                    },
                     2 => "configure_bounds",
                     3 => "wm_capabilities",
                     else => "unknown",
                 };
                 std.log.warn("xdg_toplevel: {} received {s} event", .{ tl.id, ev });
+            }
+        };
+
+        pub const XdgDecorationManager = struct {
+            id: u32,
+            client: *Client,
+            removed: bool,
+
+            pub fn create(client: *Client) !*XdgDecorationManager {
+                const dm = try client.allocator.create(XdgDecorationManager);
+                errdefer client.allocator.destroy(dm);
+                dm.* = .{
+                    .id = 0,
+                    .client = client,
+                    .removed = false,
+                };
+
+                try client.bind("zxdg_decoration_manager_v1", 1, &dm.id, dm, null, &remove);
+                return dm;
+            }
+
+            pub fn destroy(dm: *@This()) void {
+                const msg = [_]u32{ dm.id, 2 << 18 };
+                dm.client.conn.writeAll(@ptrCast(&msg)) catch |err| {
+                    std.log.err("xdg_decoration_manager {} unable to send destroy {}", .{ dm.id, err });
+                };
+                dm.client.allocator.destroy(dm);
+            }
+
+            pub fn getToplevelDecoration(dm: *@This(), tl: *XdgToplevel) !*XdgToplevedDecoration {
+                const tld = try XdgToplevedDecoration.create(dm.client);
+                errdefer tld.destroy();
+                const msg = [_]u32{ dm.id, 4 << 18 | 1, tld.id, tl.id };
+                try dm.client.conn.writeAll(@ptrCast(&msg));
+                return tld;
+            }
+
+            fn remove(ptr: *anyopaque) void {
+                const dm: *@This() = @ptrCast(@alignCast(ptr));
+                dm.removed = true;
+            }
+        };
+
+        pub const XdgToplevedDecoration = struct {
+            const Mode = enum(u32) {
+                client_side = 1,
+                server_side = 2,
+            };
+            id: u32,
+            client: *Client,
+
+            fn create(client: *Client) !*@This() {
+                const td = try client.allocator.create(@This());
+                errdefer client.allocator.destroy(td);
+                td.* = .{
+                    .id = 0,
+                    .client = client,
+                };
+
+                try client.newId(&td.id, td, &handleEvent);
+                return td;
+            }
+
+            pub fn destroy(dm: *@This()) void {
+                const msg = [_]u32{ dm.id, 2 << 18 };
+                dm.client.conn.writeAll(@ptrCast(&msg)) catch |err| {
+                    std.log.err(
+                        "xdg_toplevel_decoration {} unable to send destroy to server: {}",
+                        .{ dm.id, err },
+                    );
+                };
+                dm.client.allocator.destroy(dm);
+            }
+
+            pub fn setMode(tld: *@This(), mode: Mode) !void {
+                const msg = [_]u32{ tld.id, 3 << 18 | 1, @intFromEnum(mode) };
+                try tld.client.conn.writeAll(@ptrCast(&msg));
+            }
+
+            pub fn unsetMode(tld: *@This()) !void {
+                const msg = [_]u32{ tld.id, 2 << 18 | 2 };
+                try tld.client.conn.writeAll(@ptrCast(&msg));
+            }
+
+            fn handleEvent(ptr: *anyopaque, event: u16, data: []const u32) !void {
+                const dm: *@This() = @ptrCast(@alignCast(ptr));
+                if (event != 0) {
+                    std.log.err("xdg_toplevel_decoration {} got unsupported event {}", .{ dm.id, event });
+                    return;
+                }
+                const mode: Mode = @enumFromInt(data[0]);
+                std.log.info("xdg_toplevel_decoration {} got mode {}", .{ dm.id, mode });
             }
         };
     };
