@@ -326,7 +326,7 @@ pub fn WaylandClient(comptime A: type) type {
             /// and binding with the server
             pub fn createSurface(comp: *Compositor) !*Surface {
                 if (comp.removed) return error.ObjectRemoved;
-                const surface = try Surface.init(comp.client);
+                const surface = try Surface.create(comp.client);
                 std.log.debug("wl_compositor creating wl_surface {}", .{surface.id});
 
                 const msg: [3]u32 = .{ comp.id, 3 << 18 | 0, surface.id };
@@ -340,24 +340,7 @@ pub fn WaylandClient(comptime A: type) type {
             id: u32,
             client: *Client,
 
-            pub fn init(client: *Client) !*Surface {
-                const surface = try client.allocator.create(Surface);
-                surface.client = client;
-                try client.newId(&surface.id, surface, &handleEvent);
-
-                return surface;
-            }
-
-            /// Frees the memory and updates the server(compositor)
-            pub fn destroy(s: *Surface) void {
-                std.log.debug("wl_surface {} destroy()", .{s.id});
-                s.client.objects.items[s.id].?.destroying = true;
-                const msg: [2]u32 = .{ s.id, 8 << 16 | 0 };
-                s.client.conn.writeAll(@ptrCast(&msg)) catch |err| {
-                    std.log.err("wl_surface: {} could not send destroy() to server: {}", .{ s.id, err });
-                };
-                s.client.allocator.destroy(s);
-            }
+            pub usingnamespace BaseObject(@This(), &handleEvent);
 
             /// Just set x and y to 0 as version 5 and above would be a protocol violation
             pub fn attach(s: *Surface, buf: *Buffer, x: i32, y: i32) !void {
@@ -394,9 +377,8 @@ pub fn WaylandClient(comptime A: type) type {
                 try s.client.conn.writeAll(@ptrCast(&msg));
             }
 
-            fn handleEvent(ptr: *anyopaque, event: u16, data: []const u32) !void {
+            fn handleEvent(s: *Surface, event: u16, data: []const u32) !void {
                 _ = data;
-                const s: *Surface = @ptrCast(@alignCast(ptr));
                 std.log.warn("wl_surface {} got event {} which is not yet implemented", .{ s.id, event });
             }
         };
@@ -548,7 +530,7 @@ pub fn WaylandClient(comptime A: type) type {
                 stride: u32,
                 format: Shm.Format,
             ) !*Buffer {
-                const buf = try Buffer.init(pool.client);
+                const buf = try Buffer.create(pool.client);
                 errdefer buf.destroy();
 
                 const msg = [_]u32{
@@ -595,31 +577,10 @@ pub fn WaylandClient(comptime A: type) type {
             id: u32,
             client: *Client,
 
-            fn init(client: *Client) !*Buffer {
-                const buf = try client.allocator.create(Buffer);
-                errdefer client.allocator.destroy(buf);
-                buf.* = .{
-                    .id = 0,
-                    .client = client,
-                };
+            pub usingnamespace BaseObject(@This(), &handleEvent);
 
-                try client.newId(&buf.id, buf, &handleEvent);
-
-                return buf;
-            }
-
-            // Destroys and releases the memory
-            pub fn destroy(buf: *Buffer) void {
-                const msg = [_]u32{ buf.id, 2 << 18 | 0 };
-                buf.client.conn.writeAll(@ptrCast(&msg)) catch |err| {
-                    std.log.err("wl_buffer: unable to send destroy to server: {}", .{err});
-                };
-                buf.client.allocator.destroy(buf);
-            }
-
-            fn handleEvent(ptr: *anyopaque, event: u16, data: []const u32) !void {
+            fn handleEvent(buf: *Buffer, event: u16, data: []const u32) !void {
                 _ = data;
-                const buf: *Buffer = @ptrCast(@alignCast(ptr));
                 if (event != 0) {
                     std.log.err("wl_buffer: {} received unknown event: {}", .{ buf.id, event });
                     return;
@@ -703,30 +664,7 @@ pub fn WaylandClient(comptime A: type) type {
             configureHandler: ?*const fn (*A) anyerror!void = null,
             configurePtr: ?*anyopaque = null,
 
-            fn create(client: *Client) !*XdgSurface {
-                const s = try client.allocator.create(XdgSurface);
-                errdefer client.allocator.destroy(s);
-                s.* = .{
-                    .id = 0,
-                    .client = client,
-                };
-
-                try client.newId(&s.id, s, &handleEvent);
-
-                return s;
-            }
-
-            pub fn destroy(s: *XdgSurface) void {
-                std.log.debug(
-                    "xdg_surface: {} destroy()",
-                    .{s.id},
-                );
-                const msg = [_]u32{ s.id, 2 << 18 };
-                s.client.conn.writeAll(@ptrCast(&msg)) catch |err| {
-                    std.log.err("xdg_surface: {} failed send destroy() to server: {}", .{ s.id, err });
-                };
-                s.client.allocator.destroy(s);
-            }
+            pub usingnamespace BaseObject(@This(), &handleEvent);
 
             pub fn getToplevel(s: *XdgSurface) !*XdgToplevel {
                 const tl = try XdgToplevel.create(s.client);
@@ -743,8 +681,7 @@ pub fn WaylandClient(comptime A: type) type {
                 try s.client.conn.writeAll(@ptrCast(&msg));
             }
 
-            fn handleEvent(ptr: *anyopaque, event: u16, data: []const u32) !void {
-                const s: *XdgSurface = @ptrCast(@alignCast(ptr));
+            fn handleEvent(s: *XdgSurface, event: u16, data: []const u32) !void {
                 if (event != 0) {
                     std.log.err(
                         "xdg_surface: {} received unknown event: {}",
@@ -769,26 +706,7 @@ pub fn WaylandClient(comptime A: type) type {
             client: *Client,
             closeHandler: ?*const fn (ptr: *A) void = null,
 
-            fn create(client: *Client) !*XdgToplevel {
-                const tl = try client.allocator.create(XdgToplevel);
-                errdefer client.allocator.destroy(tl);
-                tl.* = .{
-                    .id = 0,
-                    .client = client,
-                };
-
-                try client.newId(&tl.id, tl, &handleEvent);
-
-                return tl;
-            }
-
-            pub fn destroy(tl: *XdgToplevel) void {
-                const msg = [_]u32{ tl.id, 2 << 18 };
-                tl.client.conn.writeAll(@ptrCast(&msg)) catch |err| {
-                    std.log.err("xdg_toplevel: {} destroy() could not be sent: {}", .{ tl.id, err });
-                };
-                tl.client.allocator.destroy(tl);
-            }
+            pub usingnamespace BaseObject(@This(), &handleEvent);
 
             pub fn setTitle(tl: *XdgToplevel, new_title: []const u8) !void {
                 var ntl: u32 = @intCast(new_title.len + 1);
@@ -816,10 +734,9 @@ pub fn WaylandClient(comptime A: type) type {
                 try tl.client.conn.writeAll(@ptrCast(&msg));
             }
 
-            fn handleEvent(ptr: *anyopaque, event: u16, data: []const u32) !void {
+            fn handleEvent(tl: *XdgToplevel, event: u16, data: []const u32) !void {
                 // TODO: implement
                 _ = data;
-                const tl: *XdgToplevel = @ptrCast(@alignCast(ptr));
                 const ev = switch (event) {
                     0 => "configure",
                     1 => {
@@ -886,28 +803,7 @@ pub fn WaylandClient(comptime A: type) type {
             id: u32,
             client: *Client,
 
-            fn create(client: *Client) !*@This() {
-                const td = try client.allocator.create(@This());
-                errdefer client.allocator.destroy(td);
-                td.* = .{
-                    .id = 0,
-                    .client = client,
-                };
-
-                try client.newId(&td.id, td, &handleEvent);
-                return td;
-            }
-
-            pub fn destroy(dm: *@This()) void {
-                const msg = [_]u32{ dm.id, 2 << 18 };
-                dm.client.conn.writeAll(@ptrCast(&msg)) catch |err| {
-                    std.log.err(
-                        "xdg_toplevel_decoration {} unable to send destroy to server: {}",
-                        .{ dm.id, err },
-                    );
-                };
-                dm.client.allocator.destroy(dm);
-            }
+            pub usingnamespace BaseObject(@This(), &handleEvent);
 
             pub fn setMode(tld: *@This(), mode: Mode) !void {
                 const msg = [_]u32{ tld.id, 3 << 18 | 1, @intFromEnum(mode) };
@@ -919,8 +815,7 @@ pub fn WaylandClient(comptime A: type) type {
                 try tld.client.conn.writeAll(@ptrCast(&msg));
             }
 
-            fn handleEvent(ptr: *anyopaque, event: u16, data: []const u32) !void {
-                const dm: *@This() = @ptrCast(@alignCast(ptr));
+            fn handleEvent(dm: *@This(), event: u16, data: []const u32) !void {
                 if (event != 0) {
                     std.log.err("xdg_toplevel_decoration {} got unsupported event {}", .{ dm.id, event });
                     return;
@@ -929,5 +824,29 @@ pub fn WaylandClient(comptime A: type) type {
                 std.log.info("xdg_toplevel_decoration {} got mode {}", .{ dm.id, mode });
             }
         };
+
+        fn BaseObject(T: type, event_handler: ?*const fn (*T, u16, []const u32) anyerror!void) type {
+            return struct {
+                fn create(client: *Client) !*T {
+                    const self = try client.allocator.create(T);
+                    errdefer client.allocator.destroy(self);
+                    self.* = .{
+                        .id = 0,
+                        .client = client,
+                    };
+
+                    try client.newId(&self.id, self, @ptrCast(event_handler));
+                    return self;
+                }
+
+                pub fn destroy(self: *T) void {
+                    const msg = [_]u32{ self.id, 2 << 18 };
+                    self.client.conn.writeAll(@ptrCast(&msg)) catch |err| {
+                        std.log.err(@typeName(T) ++ " {} could not send destroy: {}", .{ self.id, err });
+                    };
+                    self.client.allocator.destroy(self);
+                }
+            };
+        }
     };
 }
