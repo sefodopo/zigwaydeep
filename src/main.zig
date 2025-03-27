@@ -34,7 +34,7 @@ const App = struct {
     surface: *wl.Surface,
     xdg_surface: *wl.XdgSurface,
     toplevel: *wl.XdgToplevel,
-    xdg_toplevel_decoration: ?*wl.XdgToplevedDecoration,
+    xdg_toplevel_decoration: ?*wl.XdgToplevelDecoration,
 
     fn init(a: *App, allocator: std.mem.Allocator) !void {
         a.running = true;

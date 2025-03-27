@@ -327,9 +327,9 @@ pub fn WaylandClient(comptime A: type) type {
             pub fn createSurface(comp: *Compositor) !*Surface {
                 if (comp.removed) return error.ObjectRemoved;
                 const surface = try Surface.create(comp.client);
-                std.log.debug("wl_compositor creating wl_surface {}", .{surface.id});
+                std.log.debug("wl_compositor creating wl_surface {}", .{surface.base.id});
 
-                const msg: [3]u32 = .{ comp.id, 3 << 18 | 0, surface.id };
+                const msg: [3]u32 = .{ comp.id, 3 << 18 | 0, surface.base.id };
                 try comp.client.conn.writeAll(@ptrCast(&msg));
 
                 return surface;
@@ -337,15 +337,13 @@ pub fn WaylandClient(comptime A: type) type {
         };
 
         pub const Surface = struct {
-            id: u32,
-            client: *Client,
-
-            pub usingnamespace BaseObject(@This(), &handleEvent);
+            base: BaseObject(@This()),
+            pub usingnamespace BaseObject(@This());
 
             /// Just set x and y to 0 as version 5 and above would be a protocol violation
             pub fn attach(s: *Surface, buf: *Buffer, x: i32, y: i32) !void {
-                const msg = [_]u32{ s.id, 5 << 18 | 1, buf.id, @bitCast(x), @bitCast(y) };
-                try s.client.conn.writeAll(@ptrCast(&msg));
+                const msg = [_]u32{ s.base.id, 5 << 18 | 1, buf.base.id, @bitCast(x), @bitCast(y) };
+                try s.base.client.conn.writeAll(@ptrCast(&msg));
             }
 
             pub fn damage(s: *Surface, x: i32, y: i32, width: i32, height: i32) !void {
@@ -361,8 +359,8 @@ pub fn WaylandClient(comptime A: type) type {
             }
 
             pub fn commit(s: *Surface) !void {
-                const msg = [_]u32{ s.id, 2 << 18 | 6 };
-                try s.client.conn.writeAll(@ptrCast(&msg));
+                const msg = [_]u32{ s.base.id, 2 << 18 | 6 };
+                try s.base.client.conn.writeAll(@ptrCast(&msg));
             }
 
             pub fn damageBuffer(s: *Surface, x: i32, y: i32, width: i32, height: i32) !void {
@@ -379,7 +377,7 @@ pub fn WaylandClient(comptime A: type) type {
 
             fn handleEvent(s: *Surface, event: u16, data: []const u32) !void {
                 _ = data;
-                std.log.warn("wl_surface {} got event {} which is not yet implemented", .{ s.id, event });
+                std.log.warn("wl_surface {} got event {} which is not yet implemented", .{ s.base.id, event });
             }
         };
 
@@ -536,7 +534,7 @@ pub fn WaylandClient(comptime A: type) type {
                 const msg = [_]u32{
                     pool.id,
                     8 << 18 | 0,
-                    buf.id,
+                    buf.base.id,
                     offset,
                     width,
                     height,
@@ -574,18 +572,16 @@ pub fn WaylandClient(comptime A: type) type {
         };
 
         pub const Buffer = struct {
-            id: u32,
-            client: *Client,
-
-            pub usingnamespace BaseObject(@This(), &handleEvent);
+            base: BaseObject(@This()),
+            pub usingnamespace BaseObject(@This());
 
             fn handleEvent(buf: *Buffer, event: u16, data: []const u32) !void {
                 _ = data;
                 if (event != 0) {
-                    std.log.err("wl_buffer: {} received unknown event: {}", .{ buf.id, event });
+                    std.log.err("wl_buffer: {} received unknown event: {}", .{ buf.base.id, event });
                     return;
                 }
-                std.log.info("wl_buffer: {} received release() which is not implemented", .{buf.id});
+                std.log.info("wl_buffer: {} received release() which is not implemented", .{buf.base.id});
             }
         };
 
@@ -634,7 +630,7 @@ pub fn WaylandClient(comptime A: type) type {
                 const s = try XdgSurface.create(base.client);
                 errdefer s.destroy();
 
-                const msg = [_]u32{ base.id, 4 << 18 | 2, s.id, surface.id };
+                const msg = [_]u32{ base.id, 4 << 18 | 2, s.base.id, surface.base.id };
                 try base.client.conn.writeAll(@ptrCast(&msg));
 
                 return s;
@@ -659,54 +655,52 @@ pub fn WaylandClient(comptime A: type) type {
         };
 
         pub const XdgSurface = struct {
-            id: u32,
-            client: *Client,
             configureHandler: ?*const fn (*A) anyerror!void = null,
             configurePtr: ?*anyopaque = null,
 
-            pub usingnamespace BaseObject(@This(), &handleEvent);
+            base: BaseObject(@This()),
+            pub usingnamespace BaseObject(@This());
 
             pub fn getToplevel(s: *XdgSurface) !*XdgToplevel {
-                const tl = try XdgToplevel.create(s.client);
+                const tl = try XdgToplevel.create(s.base.client);
                 errdefer tl.destroy();
 
-                const msg = [_]u32{ s.id, 3 << 18 | 1, tl.id };
-                try s.client.conn.writeAll(@ptrCast(&msg));
+                const msg = [_]u32{ s.base.id, 3 << 18 | 1, tl.base.id };
+                try s.base.client.conn.writeAll(@ptrCast(&msg));
 
                 return tl;
             }
 
             fn ackConfigure(s: *XdgSurface, serial: u32) !void {
-                const msg = [_]u32{ s.id, 3 << 18 | 4, serial };
-                try s.client.conn.writeAll(@ptrCast(&msg));
+                const msg = [_]u32{ s.base.id, 3 << 18 | 4, serial };
+                try s.base.client.conn.writeAll(@ptrCast(&msg));
             }
 
             fn handleEvent(s: *XdgSurface, event: u16, data: []const u32) !void {
                 if (event != 0) {
                     std.log.err(
                         "xdg_surface: {} received unknown event: {}",
-                        .{ s.id, event },
+                        .{ s.base.id, event },
                     );
                     return;
                 }
                 const serial = data[0];
                 std.log.warn(
                     "xdg_surface: {} received configure {}, probably should do something...",
-                    .{ s.id, serial },
+                    .{ s.base.id, serial },
                 );
                 try s.ackConfigure(serial);
                 if (s.configureHandler) |handle| {
-                    try handle(s.client.app);
+                    try handle(s.base.client.app);
                 }
             }
         };
 
         pub const XdgToplevel = struct {
-            id: u32,
-            client: *Client,
             closeHandler: ?*const fn (ptr: *A) void = null,
 
-            pub usingnamespace BaseObject(@This(), &handleEvent);
+            base: BaseObject(@This()),
+            pub usingnamespace BaseObject(@This());
 
             pub fn setTitle(tl: *XdgToplevel, new_title: []const u8) !void {
                 var ntl: u32 = @intCast(new_title.len + 1);
@@ -714,24 +708,24 @@ pub fn WaylandClient(comptime A: type) type {
                     ntl += 4;
                 }
                 ntl >>= 2;
-                const msg = try tl.client.allocator.alloc(u32, 3 + ntl);
-                defer tl.client.allocator.free(msg);
-                msg[0] = tl.id;
+                const msg = try tl.base.client.allocator.alloc(u32, 3 + ntl);
+                defer tl.base.client.allocator.free(msg);
+                msg[0] = tl.base.id;
                 msg[1] = @intCast(msg.len << 18 | 2);
                 msg[2] = @intCast(new_title.len + 1);
                 msg[2 + ntl] = 0;
                 std.mem.copyForwards(u8, @ptrCast(msg[3..]), new_title);
-                try tl.client.conn.writeAll(@ptrCast(msg));
+                try tl.base.client.conn.writeAll(@ptrCast(msg));
             }
 
             pub fn setMaxSize(tl: *XdgToplevel, width: i32, height: i32) !void {
-                const msg = [_]u32{ tl.id, 4 << 18 | 7, @bitCast(width), @bitCast(height) };
-                try tl.client.conn.writeAll(@ptrCast(&msg));
+                const msg = [_]u32{ tl.base.id, 4 << 18 | 7, @bitCast(width), @bitCast(height) };
+                try tl.base.client.conn.writeAll(@ptrCast(&msg));
             }
 
             pub fn setMinSize(tl: *XdgToplevel, width: i32, height: i32) !void {
-                const msg = [_]u32{ tl.id, 4 << 18 | 8, @bitCast(width), @bitCast(height) };
-                try tl.client.conn.writeAll(@ptrCast(&msg));
+                const msg = [_]u32{ tl.base.id, 4 << 18 | 8, @bitCast(width), @bitCast(height) };
+                try tl.base.client.conn.writeAll(@ptrCast(&msg));
             }
 
             fn handleEvent(tl: *XdgToplevel, event: u16, data: []const u32) !void {
@@ -741,9 +735,9 @@ pub fn WaylandClient(comptime A: type) type {
                     0 => "configure",
                     1 => {
                         if (tl.closeHandler) |ch| {
-                            ch(tl.client.app);
+                            ch(tl.base.client.app);
                         } else {
-                            std.log.warn("xdg_toplevel: {} received close event that isn't handled", .{tl.id});
+                            std.log.warn("xdg_toplevel: {} received close event that isn't handled", .{tl.base.id});
                         }
                         return;
                     },
@@ -751,7 +745,7 @@ pub fn WaylandClient(comptime A: type) type {
                     3 => "wm_capabilities",
                     else => "unknown",
                 };
-                std.log.warn("xdg_toplevel: {} received {s} event", .{ tl.id, ev });
+                std.log.warn("xdg_toplevel: {} received {s} event", .{ tl.base.id, ev });
             }
         };
 
@@ -781,10 +775,10 @@ pub fn WaylandClient(comptime A: type) type {
                 dm.client.allocator.destroy(dm);
             }
 
-            pub fn getToplevelDecoration(dm: *@This(), tl: *XdgToplevel) !*XdgToplevedDecoration {
-                const tld = try XdgToplevedDecoration.create(dm.client);
+            pub fn getToplevelDecoration(dm: *@This(), tl: *XdgToplevel) !*XdgToplevelDecoration {
+                const tld = try XdgToplevelDecoration.create(dm.client);
                 errdefer tld.destroy();
-                const msg = [_]u32{ dm.id, 4 << 18 | 1, tld.id, tl.id };
+                const msg = [_]u32{ dm.id, 4 << 18 | 1, tld.base.id, tl.base.id };
                 try dm.client.conn.writeAll(@ptrCast(&msg));
                 return tld;
             }
@@ -795,19 +789,17 @@ pub fn WaylandClient(comptime A: type) type {
             }
         };
 
-        pub const XdgToplevedDecoration = struct {
+        pub const XdgToplevelDecoration = struct {
             const Mode = enum(u32) {
                 client_side = 1,
                 server_side = 2,
             };
-            id: u32,
-            client: *Client,
-
-            pub usingnamespace BaseObject(@This(), &handleEvent);
+            base: BaseObject(@This()),
+            pub usingnamespace BaseObject(@This());
 
             pub fn setMode(tld: *@This(), mode: Mode) !void {
-                const msg = [_]u32{ tld.id, 3 << 18 | 1, @intFromEnum(mode) };
-                try tld.client.conn.writeAll(@ptrCast(&msg));
+                const msg = [_]u32{ tld.base.id, 3 << 18 | 1, @intFromEnum(mode) };
+                try tld.base.client.conn.writeAll(@ptrCast(&msg));
             }
 
             pub fn unsetMode(tld: *@This()) !void {
@@ -817,34 +809,39 @@ pub fn WaylandClient(comptime A: type) type {
 
             fn handleEvent(dm: *@This(), event: u16, data: []const u32) !void {
                 if (event != 0) {
-                    std.log.err("xdg_toplevel_decoration {} got unsupported event {}", .{ dm.id, event });
+                    std.log.err("xdg_toplevel_decoration {} got unsupported event {}", .{ dm.base.id, event });
                     return;
                 }
                 const mode: Mode = @enumFromInt(data[0]);
-                std.log.info("xdg_toplevel_decoration {} got mode {}", .{ dm.id, mode });
+                std.log.info("xdg_toplevel_decoration {} got mode {}", .{ dm.base.id, mode });
             }
         };
 
-        fn BaseObject(T: type, event_handler: ?*const fn (*T, u16, []const u32) anyerror!void) type {
+        fn BaseObject(T: type) type {
             return struct {
+                id: u32,
+                client: *Client,
+
                 fn create(client: *Client) !*T {
                     const self = try client.allocator.create(T);
                     errdefer client.allocator.destroy(self);
                     self.* = .{
-                        .id = 0,
-                        .client = client,
+                        .base = .{
+                            .id = 0,
+                            .client = client,
+                        },
                     };
 
-                    try client.newId(&self.id, self, @ptrCast(event_handler));
+                    try client.newId(&self.base.id, self, if (@hasDecl(T, "handleEvent")) @ptrCast(&T.handleEvent) else null);
                     return self;
                 }
 
                 pub fn destroy(self: *T) void {
-                    const msg = [_]u32{ self.id, 2 << 18 };
-                    self.client.conn.writeAll(@ptrCast(&msg)) catch |err| {
-                        std.log.err(@typeName(T) ++ " {} could not send destroy: {}", .{ self.id, err });
+                    const msg = [_]u32{ self.base.id, 2 << 18 };
+                    self.base.client.conn.writeAll(@ptrCast(&msg)) catch |err| {
+                        std.log.err(@typeName(T) ++ " {} could not send destroy: {}", .{ self.base.id, err });
                     };
-                    self.client.allocator.destroy(self);
+                    self.base.client.allocator.destroy(self);
                 }
             };
         }
