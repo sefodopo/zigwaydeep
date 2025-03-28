@@ -14,12 +14,20 @@ const State = struct {
     globals: std.AutoArrayHashMap(u32, Global),
     running: bool = true,
     callback_done: bool = false,
+    allocator: std.mem.Allocator,
+
     surface: wl.Surface = undefined,
     xdgSurface: wl.XdgSurface = undefined,
-};
+    shm: wl.Shm = undefined,
+    pool: wl.ShmPool = undefined,
+    buffer: wl.Buffer = undefined,
 
-const WIDTH = 343;
-const HEIGHT = 300;
+    width: u32 = 600,
+    height: u32 = 600,
+    last_suggestion: ?std.meta.TagPayload(wl.XdgToplevel.Event, .configure) = null,
+    bound_width: u32 = 0,
+    bound_height: u32 = 0,
+};
 
 /// The main entrypoint to the entire program!
 pub fn main() !void {
@@ -31,6 +39,7 @@ pub fn main() !void {
 
     var state = State{
         .globals = std.AutoArrayHashMap(u32, Global).init(allocator),
+        .allocator = allocator,
     };
     defer {
         for (state.globals.values()) |global| {
@@ -55,17 +64,15 @@ pub fn main() !void {
 
     const compositor = try getGlobal(&state, &display, registry, wl.Compositor, "wl_compositor");
     const shm = try getGlobal(&state, &display, registry, wl.Shm, "wl_shm");
+    state.shm = shm;
     const xdg_wm_base = try getGlobal(&state, &display, registry, wl.XdgWmBase, "xdg_wm_base");
     try xdg_wm_base.setHandler(&xdg_wm_base, handleXdgWm);
     const xdg_decor_manager: ?wl.XdgDecorationManager = getGlobal(&state, &display, registry, wl.XdgDecorationManager, "zxdg_decoration_manager_v1") catch null;
 
-    const pool = try shm.createPool(WIDTH * HEIGHT * 4);
-    const buffer = try pool.createBuffer(0, WIDTH, HEIGHT, WIDTH * 4, .xrgb8888);
-
-    state.callback_done = false;
-    cb = try display.sync();
-    try cb.setHandler(&state, handleCallback);
-    while (!state.callback_done) try display.read();
+    const pool = try shm.createPool(state.width * state.height * 4);
+    state.pool = pool;
+    const buffer = try pool.createBuffer(0, state.width, state.height, state.width * 4, .xrgb8888);
+    state.buffer = buffer;
 
     const surface = try compositor.createSurface();
     const xdg_surface = try xdg_wm_base.getXdgSurface(surface);
@@ -79,8 +86,7 @@ pub fn main() !void {
         try dec.setMode(.server_side);
     }
     try toplevel.setTitle("Hello Zigity");
-    try toplevel.setMinSize(WIDTH, HEIGHT);
-    try toplevel.setMaxSize(WIDTH, HEIGHT);
+    try toplevel.setMinSize(400, 400);
     try surface.commit();
     try surface.attach(buffer, 0, 0);
 
@@ -90,6 +96,35 @@ pub fn main() !void {
 }
 
 fn handleXdgSurface(state: *State, event: wl.XdgSurface.Event) !void {
+    if (state.last_suggestion) |suggestion| {
+        // cannot access the states since we haven't copied them yet
+        state.last_suggestion = null;
+        if (suggestion.width != 0 and suggestion.height != 0 and
+            (suggestion.width != state.width or suggestion.height != state.height))
+        {
+            state.width = suggestion.width;
+            state.height = suggestion.height;
+            const stride = suggestion.width * 4;
+            const size = stride * suggestion.height;
+            if (size > state.pool.data.len) {
+                const newSize = @max(size, state.pool.data.len * 2);
+                try state.pool.resize(@intCast(newSize));
+                const buffer = try state.pool.createBuffer(0, suggestion.width, suggestion.height, stride, .xrgb8888);
+                try state.xdgSurface.ackConfigure(event.configure);
+                try state.surface.attach(buffer, 0, 0);
+                try state.surface.commit();
+                state.buffer = buffer;
+                return;
+            } else {
+                const buffer = try state.pool.createBuffer(0, suggestion.width, suggestion.height, stride, .xrgb8888);
+                try state.xdgSurface.ackConfigure(event.configure);
+                try state.surface.attach(buffer, 0, 0);
+                try state.surface.commit();
+                state.buffer = buffer;
+                return;
+            }
+        }
+    }
     try state.xdgSurface.ackConfigure(event.configure);
     try state.surface.commit();
 }
@@ -144,6 +179,11 @@ fn handleCallback(state: *State, _: void) !void {
 fn handleToplevel(state: *State, event: wl.XdgToplevel.Event) !void {
     switch (event) {
         .close => state.running = false,
+        .configure => |c| state.last_suggestion = c,
+        .configure_bounds => |b| {
+            state.bound_width = b.width;
+            state.bound_height = b.height;
+        },
         else => {},
     }
 }

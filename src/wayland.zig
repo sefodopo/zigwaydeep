@@ -444,13 +444,13 @@ pub const ShmPool = struct {
         };
     }
 
-    pub fn resize(pool: ShmPool, new_size: u32) !void {
+    pub fn resize(pool: *ShmPool, new_size: u32) !void {
         try std.posix.ftruncate(pool.fd, new_size);
         pool.data = try std.posix.mremap(
-            pool.data,
+            @ptrCast(pool.data),
             0, // will create a mapping with the same pages since it is shared
             new_size,
-            0,
+            .{ .MAYMOVE = true },
             null,
         );
         try pool.display.sendMsg(pool.id, 2, .{new_size});
@@ -541,10 +541,22 @@ pub const XdgToplevel = struct {
     display: *Display,
 
     pub const Event = union(enum) {
+        pub const State = enum(u32) {
+            maximized = 1,
+            fullscreen = 2,
+            resizing = 3,
+            activated = 4,
+            tiled_left = 5,
+            tiled_right = 6,
+            tiled_top = 7,
+            tiled_bottom = 8,
+            suspended = 9,
+            _,
+        };
         configure: struct {
             width: u32,
             height: u32,
-            states: []const u32,
+            states: []const State,
         },
         close: void,
         configure_bounds: struct {
@@ -557,7 +569,7 @@ pub const XdgToplevel = struct {
                 0 => .{ .configure = .{
                     .width = data[0],
                     .height = data[1],
-                    .states = data[2..],
+                    .states = @ptrCast(data[3..]),
                 } },
                 1 => .close,
                 2 => .{ .configure_bounds = .{
