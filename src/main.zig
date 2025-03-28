@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const wl = @import("wayland2.zig");
+const wl = @import("wayland.zig");
 
 const Stream = std.net.Stream;
 
@@ -13,10 +13,7 @@ const Global = struct {
 
 const State = struct {
     globals: std.AutoArrayHashMap(u32, Global),
-    handlers: [32]?[]const ?*const fn (*State, []const u32) anyerror!void,
-    sync_done: bool,
-    running: bool,
-    conn: Stream,
+    running: bool = true,
 };
 
 const WIDTH = 300;
@@ -29,58 +26,32 @@ pub fn main() !void {
     }).init;
     defer std.log.info("Were there memory leaks: {}", .{gpalloc.deinit()});
     const allocator = gpalloc.allocator();
+
+    var decoder = wl.Decoder.init(allocator);
+    defer decoder.deinit();
+
     var state = State{
         .globals = std.AutoArrayHashMap(u32, Global).init(allocator),
-        .handlers = undefined,
-        .sync_done = true,
-        .running = true,
-        .conn = undefined,
     };
-    defer {
-        for (state.globals.values()) |global| {
-            allocator.free(global.interface);
-        }
-        state.globals.deinit();
-    }
 
-    state.handlers[1] = &.{ &handleError, null };
+    const display = try wl.Display.connect(allocator);
+    defer display.close();
+    try display.setHandler(&decoder, &state, handleDisplay);
 
-    const conn = try wl.displayConnect(allocator);
-    state.conn = conn;
-    try wl.getRegistry(conn);
-    state.handlers[2] = &.{ &handleGlobal, &handleGlobalRemove };
+    const registry = try display.getRegistry();
+    _ = registry;
+    // registry.setHandler(State, &handleRegistry, &state);
+}
 
-    try sync(allocator, conn, &state, 3);
-
-    try bind(conn, state.globals, "wl_compositor", 0, 3);
-    try bind(conn, state.globals, "wl_shm", 0, 4);
-    defer wl.sendMsg(conn, 4, 1, .{}) catch {};
-    try bind(conn, state.globals, "xdg_wm_base", 0, 5);
-    defer wl.sendMsg(conn, 5, 0, .{}) catch {};
-    state.handlers[5] = &.{&handlePing};
-
-    const shm = try wl.ShmPool.create(conn, 4, 6, WIDTH * HEIGHT * 4);
-    defer shm.destroy(conn);
-
-    try wl.sendMsg(conn, 6, 0, .{ 7, 0, WIDTH, HEIGHT, WIDTH * 4, 1 }); // Buffer
-    defer wl.sendMsg(conn, 7, 0, .{}) catch {};
-    try wl.sendMsg(conn, 3, 0, .{8}); // Surface
-    defer wl.sendMsg(conn, 8, 0, .{}) catch {};
-    try wl.sendMsg(conn, 5, 2, .{ 9, 8 }); // xdg surface
-    defer wl.sendMsg(conn, 9, 0, .{}) catch {};
-    state.handlers[9] = &.{&handleXdgConfigure};
-    try wl.sendMsg(conn, 9, 1, .{10}); // toplevel
-    defer wl.sendMsg(conn, 10, 0, .{}) catch {};
-    state.handlers[10] = &.{ null, &handleClose, null, null };
-    try wl.sendMsg(conn, 10, 2, .{"Hello Zigity"});
-    try wl.sendMsg(conn, 10, 7, .{ WIDTH, HEIGHT });
-    try wl.sendMsg(conn, 10, 8, .{ WIDTH, HEIGHT });
-    try wl.sendMsg(conn, 8, 6, .{}); // commit
-    try wl.sendMsg(conn, 8, 1, .{ 7, 0, 0 }); // attach
-    try sync(allocator, conn, &state, 11);
-
-    while (state.running) {
-        try read(allocator, conn, &state);
+fn handleDisplay(state: *State, event: wl.Display.Event) !void {
+    switch (event) {
+        .err => |err| {
+            state.running = false;
+            std.log.err("FATAL ERROR: {}", .{err});
+        },
+        .delete_id => |id| {
+            std.log.debug("delete_id: {}", .{id});
+        },
     }
 }
 
