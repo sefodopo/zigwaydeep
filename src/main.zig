@@ -6,7 +6,6 @@ const wl = @import("wayland.zig");
 const Stream = std.net.Stream;
 
 const Global = struct {
-    name: u32,
     interface: []const u8,
     version: u32,
 };
@@ -14,9 +13,12 @@ const Global = struct {
 const State = struct {
     globals: std.AutoArrayHashMap(u32, Global),
     running: bool = true,
+    callback_done: bool = false,
+    surface: wl.Surface = undefined,
+    xdgSurface: wl.XdgSurface = undefined,
 };
 
-const WIDTH = 300;
+const WIDTH = 343;
 const HEIGHT = 300;
 
 /// The main entrypoint to the entire program!
@@ -27,27 +29,93 @@ pub fn main() !void {
     defer std.log.info("Were there memory leaks: {}", .{gpalloc.deinit()});
     const allocator = gpalloc.allocator();
 
-    var decoder = wl.Decoder.init(allocator);
-    defer decoder.deinit();
-
     var state = State{
         .globals = std.AutoArrayHashMap(u32, Global).init(allocator),
     };
+    defer {
+        for (state.globals.values()) |global| {
+            allocator.free(global.interface);
+        }
+        state.globals.deinit();
+    }
 
-    const display = try wl.Display.connect(allocator);
-    defer display.close();
-    try display.setHandler(&decoder, &state, handleDisplay);
+    var display = try wl.Display.init(allocator);
+    defer display.deinit();
+    try display.setHandler(&state, handleDisplay);
 
     const registry = try display.getRegistry();
-    _ = registry;
-    // registry.setHandler(State, &handleRegistry, &state);
+    try registry.setHandler(&state, handleRegistry);
+
+    var cb = try display.sync();
+    try cb.setHandler(&state, handleCallback);
+
+    while (!state.callback_done) {
+        try display.read();
+    }
+
+    const compositor = try getGlobal(&state, &display, registry, wl.Compositor, "wl_compositor");
+    const shm = try getGlobal(&state, &display, registry, wl.Shm, "wl_shm");
+    const xdg_wm_base = try getGlobal(&state, &display, registry, wl.XdgWmBase, "xdg_wm_base");
+    try xdg_wm_base.setHandler(&xdg_wm_base, handleXdgWm);
+    const xdg_decor_manager: ?wl.XdgDecorationManager = getGlobal(&state, &display, registry, wl.XdgDecorationManager, "zxdg_decoration_manager_v1") catch null;
+
+    const pool = try shm.createPool(WIDTH * HEIGHT * 4);
+    const buffer = try pool.createBuffer(0, WIDTH, HEIGHT, WIDTH * 4, .xrgb8888);
+
+    state.callback_done = false;
+    cb = try display.sync();
+    try cb.setHandler(&state, handleCallback);
+    while (!state.callback_done) try display.read();
+
+    const surface = try compositor.createSurface();
+    const xdg_surface = try xdg_wm_base.getXdgSurface(surface);
+    state.surface = surface;
+    state.xdgSurface = xdg_surface;
+    try xdg_surface.setHandler(&state, handleXdgSurface);
+    const toplevel = try xdg_surface.getToplevel();
+    try toplevel.setHandler(&state, handleToplevel);
+    const decor = if (xdg_decor_manager) |dm| try dm.getToplevelDecoration(toplevel) else null;
+    if (decor) |dec| {
+        try dec.setMode(.server_side);
+    }
+    try toplevel.setTitle("Hello Zigity");
+    try toplevel.setMinSize(WIDTH, HEIGHT);
+    try toplevel.setMaxSize(WIDTH, HEIGHT);
+    try surface.commit();
+    try surface.attach(buffer, 0, 0);
+
+    while (state.running) {
+        try display.read();
+    }
+}
+
+fn handleXdgSurface(state: *State, event: wl.XdgSurface.Event) !void {
+    try state.xdgSurface.ackConfigure(event.configure);
+    try state.surface.commit();
+}
+
+fn handleXdgWm(wm: *const wl.XdgWmBase, event: wl.XdgWmBase.Event) !void {
+    std.log.debug("sending pong: {}", .{event.ping});
+    try wm.pong(event.ping);
+}
+
+fn getGlobal(state: *State, display: *wl.Display, registry: wl.Registry, G: type, interface: []const u8) !G {
+    var it = state.globals.iterator();
+    while (it.next()) |entry| {
+        if (std.mem.eql(u8, entry.value_ptr.interface, interface)) {
+            const g = G.init(display);
+            try registry.bind(entry.key_ptr.*, interface, entry.value_ptr.version, g);
+            return g;
+        }
+    }
+    return error.NoSuchGlobal;
 }
 
 fn handleDisplay(state: *State, event: wl.Display.Event) !void {
     switch (event) {
         .err => |err| {
             state.running = false;
-            std.log.err("FATAL ERROR: {}", .{err});
+            std.log.err("FATAL ERROR: object_id: {}, code: {s}, message: {s}", .{ err.object_id, @tagName(err.code), err.message });
         },
         .delete_id => |id| {
             std.log.debug("delete_id: {}", .{id});
@@ -55,89 +123,27 @@ fn handleDisplay(state: *State, event: wl.Display.Event) !void {
     }
 }
 
-fn sync(allocator: std.mem.Allocator, conn: Stream, state: *State, id: u32) !void {
-    if (!state.sync_done) return error.SyncInProgress;
-    std.log.debug("starting sync: {}", .{id});
-    state.sync_done = false;
-    try wl.sync(conn, id);
-    state.handlers[id] = &.{&handleSyncDone};
-    while (!state.sync_done) {
-        try read(allocator, conn, state);
-    }
-    std.log.debug("sync {} complete", .{id});
-}
-
-fn handlePing(state: *State, data: []const u32) !void {
-    const serial = data[0];
-    try wl.sendMsg(state.conn, 5, 3, .{serial});
-    std.log.debug("received ping: {}", .{serial});
-}
-
-fn handleClose(state: *State, _: []const u32) !void {
-    state.running = false;
-    std.log.debug("received close, closing", .{});
-}
-
-fn handleXdgConfigure(state: *State, data: []const u32) !void {
-    const serial = data[0];
-    try wl.sendMsg(state.conn, 9, 4, .{serial});
-    try wl.sendMsg(state.conn, 8, 6, .{}); // commit surface
-}
-
-fn bind(conn: Stream, globals: std.AutoArrayHashMap(u32, Global), interface: []const u8, version: u32, new_id: u32) !void {
-    for (globals.values()) |global| {
-        if (std.mem.eql(u8, global.interface, interface)) {
-            var v = version;
-            if (v == 0) {
-                v = global.version;
-            }
-            try wl.bind(conn, global.name, interface, v, new_id);
-        }
+fn handleRegistry(state: *State, event: wl.Registry.Event) !void {
+    switch (event) {
+        .global => |gd| {
+            try state.globals.put(gd.name, .{
+                .interface = try state.globals.allocator.dupe(u8, gd.interface),
+                .version = gd.version,
+            });
+        },
+        .global_remove => |name| {
+            std.log.warn("global {} removed, hopefully I wasn't using it...", .{name});
+        },
     }
 }
 
-fn read(allocator: std.mem.Allocator, conn: Stream, state: *State) !void {
-    const msg = try wl.readMsg(allocator, conn);
-    defer msg.free();
-    if (state.handlers[msg.object]) |handlers| {
-        if (handlers[msg.event]) |handler| {
-            return try handler(state, msg.data);
-        }
+fn handleCallback(state: *State, _: void) !void {
+    state.callback_done = true;
+}
+
+fn handleToplevel(state: *State, event: wl.XdgToplevel.Event) !void {
+    switch (event) {
+        .close => state.running = false,
+        else => {},
     }
-    std.log.warn("received unhandled event {any}", .{msg});
-}
-
-fn handleError(state: *State, data: []const u32) !void {
-    _ = state;
-    const object = data[0];
-    const code = data[1];
-    const msg: []const u8 = @ptrCast(data[3..]);
-    std.log.err("unrecoverable error detected from object: {} code: {}, msg: {s}", .{ object, code, msg });
-    unreachable;
-}
-
-fn handleGlobal(state: *State, data: []const u32) !void {
-    const name = data[0];
-    const intlen = data[1];
-    const interface = try state.globals.allocator.alloc(u8, intlen - 1);
-    @memcpy(interface, @as([]const u8, @ptrCast(data[2..]))[0 .. intlen - 1]);
-    const version = data[data.len - 1];
-    std.log.debug("discovered global: {:2} {s:^45} {:2}", .{ name, interface, version });
-    try state.globals.put(name, .{
-        .name = name,
-        .interface = interface,
-        .version = version,
-    });
-}
-
-fn handleGlobalRemove(state: *State, data: []const u32) !void {
-    const name = data[0];
-    if (state.globals.fetchSwapRemove(name)) |glob| {
-        std.log.warn("global {} removed", .{glob.value});
-        state.globals.allocator.free(glob.value.interface);
-    }
-}
-
-fn handleSyncDone(state: *State, _: []const u32) !void {
-    state.sync_done = true;
 }
