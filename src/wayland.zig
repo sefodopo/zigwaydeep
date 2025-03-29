@@ -308,6 +308,12 @@ pub const Shm = struct {
         argb8888 = 0,
         xrgb8888 = 1,
         c8 = 0x20203843,
+        rgb332 = 0x38424752,
+        bgr233 = 0x38524742,
+        xrgb4444 = 0x32315258,
+        rbgr4444 = 0x32314258,
+        abgr8888 = 0x34324241,
+        xbgr8888 = 0x34324258,
         _,
         fn parse(event: u32, data: []const u32) !Format {
             if (event != 0) unreachable;

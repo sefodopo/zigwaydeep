@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 
 const wl = @import("wayland.zig");
 
@@ -16,9 +15,17 @@ const State = struct {
     callback_done: bool = false,
     allocator: std.mem.Allocator,
 
-    surface: wl.Surface = undefined,
-    xdgSurface: wl.XdgSurface = undefined,
+    display: wl.Display = undefined,
+    registry: wl.Registry = undefined,
+    compositor: wl.Compositor = undefined,
     shm: wl.Shm = undefined,
+    xdg_wm_base: wl.XdgWmBase = undefined,
+    xdg_decoration_manager: ?wl.XdgDecorationManager = null,
+
+    surface: wl.Surface = undefined,
+    xdg_surface: wl.XdgSurface = undefined,
+    toplevel: wl.XdgToplevel = undefined,
+    xdg_decoration: ?wl.XdgToplevelDecoration = null,
     pool: wl.ShmPool = undefined,
     buffer: wl.Buffer = undefined,
 
@@ -48,51 +55,55 @@ pub fn main() !void {
         state.globals.deinit();
     }
 
-    var display = try wl.Display.init(allocator);
-    defer display.deinit();
-    try display.setHandler(&state, handleDisplay);
+    try initWindow(&state);
 
-    const registry = try display.getRegistry();
-    try registry.setHandler(&state, handleRegistry);
+    while (state.running) {
+        try state.display.read();
+    }
+}
 
-    var cb = try display.sync();
-    try cb.setHandler(&state, handleCallback);
+fn initWindow(state: *State) !void {
+    state.display = try wl.Display.init(state.allocator);
+    errdefer state.display.deinit();
+    try state.display.setHandler(state, handleDisplay);
+
+    state.registry = try state.display.getRegistry();
+    try state.registry.setHandler(state, handleRegistry);
+
+    var cb = try state.display.sync();
+    try cb.setHandler(state, handleCallback);
 
     while (!state.callback_done) {
-        try display.read();
+        try state.display.read();
     }
 
-    const compositor = try getGlobal(&state, &display, registry, wl.Compositor, "wl_compositor");
-    const shm = try getGlobal(&state, &display, registry, wl.Shm, "wl_shm");
-    state.shm = shm;
-    const xdg_wm_base = try getGlobal(&state, &display, registry, wl.XdgWmBase, "xdg_wm_base");
-    try xdg_wm_base.setHandler(&state, handleXdgWm);
-    const xdg_decor_manager: ?wl.XdgDecorationManager = getGlobal(&state, &display, registry, wl.XdgDecorationManager, "zxdg_decoration_manager_v1") catch null;
+    const compositor = try getGlobal(state, wl.Compositor, "wl_compositor");
+    state.shm = try getGlobal(state, wl.Shm, "wl_shm");
+    try state.shm.setHandler(state, handleShm);
+    const xdg_wm_base = try getGlobal(state, wl.XdgWmBase, "xdg_wm_base");
+    try xdg_wm_base.setHandler(state, handleXdgWm);
+    const xdg_decor_manager: ?wl.XdgDecorationManager = getGlobal(
+        state,
+        wl.XdgDecorationManager,
+        "zxdg_decoration_manager_v1",
+    ) catch null;
 
-    const pool = try shm.createPool(state.width * state.height * 4);
-    state.pool = pool;
-    const buffer = try pool.createBuffer(0, state.width, state.height, state.width * 4, .xrgb8888);
-    state.buffer = buffer;
+    state.pool = try state.shm.createPool(state.width * state.height * 4);
+    state.buffer = try state.pool.createBuffer(0, state.width, state.height, state.width * 4, .xrgb8888);
 
-    const surface = try compositor.createSurface();
-    const xdg_surface = try xdg_wm_base.getXdgSurface(surface);
-    state.surface = surface;
-    state.xdgSurface = xdg_surface;
-    try xdg_surface.setHandler(&state, handleXdgSurface);
-    const toplevel = try xdg_surface.getToplevel();
-    try toplevel.setHandler(&state, handleToplevel);
+    state.surface = try compositor.createSurface();
+    state.xdg_surface = try xdg_wm_base.getXdgSurface(state.surface);
+    try state.xdg_surface.setHandler(state, handleXdgSurface);
+    const toplevel = try state.xdg_surface.getToplevel();
+    try toplevel.setHandler(state, handleToplevel);
     const decor = if (xdg_decor_manager) |dm| try dm.getToplevelDecoration(toplevel) else null;
     if (decor) |dec| {
         try dec.setMode(.server_side);
     }
     try toplevel.setTitle("Hello Zigity");
     try toplevel.setMinSize(400, 400);
-    try surface.commit();
-    try surface.attach(buffer, 0, 0);
-
-    while (state.running) {
-        try display.read();
-    }
+    try state.surface.commit();
+    try state.surface.attach(state.buffer, 0, 0);
 }
 
 fn handleXdgSurface(_: *wl.XdgSurface, state: *State, event: wl.XdgSurface.Event) !void {
@@ -109,23 +120,23 @@ fn handleXdgSurface(_: *wl.XdgSurface, state: *State, event: wl.XdgSurface.Event
             if (size > state.pool.data.len) {
                 const newSize = @max(size, state.pool.data.len * 2);
                 try state.pool.resize(@intCast(newSize));
-                const buffer = try state.pool.createBuffer(0, suggestion.width, suggestion.height, stride, .xrgb8888);
-                try state.xdgSurface.ackConfigure(event.configure);
-                try state.surface.attach(buffer, 0, 0);
-                try state.surface.commit();
-                state.buffer = buffer;
-                return;
-            } else {
-                const buffer = try state.pool.createBuffer(0, suggestion.width, suggestion.height, stride, .xrgb8888);
-                try state.xdgSurface.ackConfigure(event.configure);
-                try state.surface.attach(buffer, 0, 0);
-                try state.surface.commit();
-                state.buffer = buffer;
-                return;
+            }
+            const buffer = try state.pool.createBuffer(
+                0,
+                suggestion.width,
+                suggestion.height,
+                stride,
+                .xrgb8888,
+            );
+
+            try state.surface.attach(buffer, 0, 0);
+            state.buffer = buffer;
+            for (@as([]u32, @ptrCast(state.pool.data[0..size]))) |*pix| {
+                pix.* = 0xff0f0f0f;
             }
         }
     }
-    try state.xdgSurface.ackConfigure(event.configure);
+    try state.xdg_surface.ackConfigure(event.configure);
     try state.surface.commit();
 }
 
@@ -134,16 +145,20 @@ fn handleXdgWm(wm: *const wl.XdgWmBase, _: *State, event: wl.XdgWmBase.Event) !v
     try wm.pong(event.ping);
 }
 
-fn getGlobal(state: *State, display: *wl.Display, registry: wl.Registry, G: type, interface: []const u8) !G {
+fn getGlobal(state: *State, G: type, interface: []const u8) !G {
     var it = state.globals.iterator();
     while (it.next()) |entry| {
         if (std.mem.eql(u8, entry.value_ptr.interface, interface)) {
-            const g = G.init(display);
-            try registry.bind(entry.key_ptr.*, interface, entry.value_ptr.version, g);
+            const g = G.init(&state.display);
+            try state.registry.bind(entry.key_ptr.*, interface, entry.value_ptr.version, g);
             return g;
         }
     }
     return error.NoSuchGlobal;
+}
+
+fn handleShm(_: *wl.Shm, _: *State, event: wl.Shm.Format) !void {
+    std.log.debug("Format supported: {x}", .{event});
 }
 
 fn handleDisplay(_: *wl.Display, state: *State, event: wl.Display.Event) !void {
