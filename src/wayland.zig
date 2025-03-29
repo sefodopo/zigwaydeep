@@ -306,6 +306,10 @@ pub const Surface = struct {
         }
     };
 
+    pub fn destroy(s: Surface) void {
+        s.display.sendMsg(s.id, 0, .{}) catch |err| std.log.err("destroy surface: {}", .{err});
+    }
+
     /// Just set x and y to 0 as version 5 and above would be a protocol violation
     pub fn attach(s: Surface, buf: Buffer, x: i32, y: i32) !void {
         try s.display.sendMsg(s.id, 1, .{ buf.id, x, y });
@@ -450,11 +454,6 @@ pub const ShmPool = struct {
         };
     }
 
-    pub fn deinit(pool: ShmPool) void {
-        std.posix.munmap(pool.data);
-        std.posix.close(pool.fd);
-    }
-
     /// Caller owns the buffer which must be destroy()ed.
     pub fn createBuffer(
         pool: ShmPool,
@@ -486,7 +485,7 @@ pub const ShmPool = struct {
     pub fn destroy(pool: ShmPool) void {
         std.posix.munmap(pool.data);
         std.posix.close(pool.fd);
-        pool.display.writeMsg(pool.id, 1, .{}) catch |err| {
+        pool.display.sendMsg(pool.id, 1, .{}) catch |err| {
             std.log.err(
                 "wl_shm_pool: unable to send destroy message to server, hope everything is okay: {}",
                 .{err},
@@ -513,6 +512,10 @@ pub const Buffer = struct {
 
     const Event = void;
     pub usingnamespace setHandlerNamespace(@This());
+
+    pub fn destroy(b: Buffer) void {
+        b.display.sendMsg(b.id, 0, .{}) catch |err| std.log.err("destroy buffer: {}", .{err});
+    }
 };
 
 pub const XdgWmBase = struct {
@@ -537,9 +540,10 @@ pub const XdgWmBase = struct {
         };
     }
 
-    pub fn destroy(base: XdgWmBase) !void {
+    pub fn destroy(base: XdgWmBase) void {
         std.log.debug("xdg_wm_base: {} destroy()", .{base.id});
-        try base.display.sendMsg(base.id, 0, .{});
+        base.display.sendMsg(base.id, 0, .{}) catch |err|
+            std.log.err("destroy xdg_wm_base: {}", .{err});
     }
 
     pub fn getXdgSurface(base: XdgWmBase, surface: Surface) !XdgSurface {
@@ -569,6 +573,11 @@ pub const XdgSurface = struct {
         }
     };
     pub usingnamespace setHandlerNamespace(@This());
+
+    pub fn destroy(d: @This()) void {
+        d.display.sendMsg(d.id, 0, .{}) catch |err|
+            std.log.err("destroy xdg_surface: {}", .{err});
+    }
 
     pub fn getToplevel(s: XdgSurface) !XdgToplevel {
         const id = next_id;
@@ -633,6 +642,11 @@ pub const XdgToplevel = struct {
     };
     pub usingnamespace setHandlerNamespace(@This());
 
+    pub fn destroy(d: @This()) void {
+        d.display.sendMsg(d.id, 0, .{}) catch |err|
+            std.log.err("destroy xdg_toplevel: {}", .{err});
+    }
+
     pub fn setTitle(tl: XdgToplevel, new_title: []const u8) !void {
         try tl.display.sendMsg(tl.id, 2, .{new_title});
     }
@@ -659,8 +673,9 @@ pub const XdgDecorationManager = struct {
         };
     }
 
-    pub fn destroy(dm: @This()) !void {
-        try dm.display.sendMsg(dm.id, 0, .{});
+    pub fn destroy(dm: @This()) void {
+        dm.display.sendMsg(dm.id, 0, .{}) catch |err|
+            std.log.err("destroy xdg_decoration_manager: {}", .{err});
     }
 
     pub fn getToplevelDecoration(dm: @This(), tl: XdgToplevel) !XdgToplevelDecoration {
@@ -687,6 +702,11 @@ pub const XdgToplevelDecoration = struct {
     };
     pub const Event = Mode;
     pub usingnamespace setHandlerNamespace(@This());
+
+    pub fn destroy(d: @This()) void {
+        d.display.sendMsg(d.id, 0, .{}) catch |err|
+            std.log.err("destroy xdg_toplevel_decoration: {}", .{err});
+    }
 
     pub fn setMode(tld: @This(), mode: Mode) !void {
         try tld.display.sendMsg(tld.id, 1, .{@intFromEnum(mode)});

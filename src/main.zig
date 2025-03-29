@@ -60,6 +60,8 @@ pub fn main() !void {
     while (state.running) {
         try state.display.read();
     }
+
+    deinitWindow(&state);
 }
 
 fn initWindow(state: *State) !void {
@@ -77,12 +79,12 @@ fn initWindow(state: *State) !void {
         try state.display.read();
     }
 
-    const compositor = try getGlobal(state, wl.Compositor, "wl_compositor");
+    state.compositor = try getGlobal(state, wl.Compositor, "wl_compositor");
     state.shm = try getGlobal(state, wl.Shm, "wl_shm");
     try state.shm.setHandler(state, handleShm);
-    const xdg_wm_base = try getGlobal(state, wl.XdgWmBase, "xdg_wm_base");
-    try xdg_wm_base.setHandler(state, handleXdgWm);
-    const xdg_decor_manager: ?wl.XdgDecorationManager = getGlobal(
+    state.xdg_wm_base = try getGlobal(state, wl.XdgWmBase, "xdg_wm_base");
+    try state.xdg_wm_base.setHandler(state, handleXdgWm);
+    state.xdg_decoration_manager = getGlobal(
         state,
         wl.XdgDecorationManager,
         "zxdg_decoration_manager_v1",
@@ -94,22 +96,44 @@ fn initWindow(state: *State) !void {
         state.width,
         state.height,
         state.width * 4,
-        .xrgb8888,
+        .argb8888,
     );
+    try state.buffer.setHandler(state, handleBufferRelease);
 
-    state.surface = try compositor.createSurface();
-    state.xdg_surface = try xdg_wm_base.getXdgSurface(state.surface);
+    state.surface = try state.compositor.createSurface();
+    state.xdg_surface = try state.xdg_wm_base.getXdgSurface(state.surface);
     try state.xdg_surface.setHandler(state, handleXdgSurface);
-    const toplevel = try state.xdg_surface.getToplevel();
-    try toplevel.setHandler(state, handleToplevel);
-    const decor = if (xdg_decor_manager) |dm| try dm.getToplevelDecoration(toplevel) else null;
-    if (decor) |dec| {
+    state.toplevel = try state.xdg_surface.getToplevel();
+    try state.toplevel.setHandler(state, handleToplevel);
+    state.xdg_decoration = if (state.xdg_decoration_manager) |dm|
+        try dm.getToplevelDecoration(state.toplevel)
+    else
+        null;
+    if (state.xdg_decoration) |dec| {
         try dec.setMode(.server_side);
     }
-    try toplevel.setTitle("Hello Zigity");
-    try toplevel.setMinSize(400, 400);
+    try state.toplevel.setTitle("Hello Zigity");
+    try state.toplevel.setMinSize(400, 400);
     try state.surface.commit();
     try state.surface.attach(state.buffer, 0, 0);
+}
+
+fn deinitWindow(state: *State) void {
+    if (state.xdg_decoration) |d| d.destroy();
+    if (state.xdg_decoration_manager) |d| d.destroy();
+    state.toplevel.destroy();
+    state.xdg_surface.destroy();
+    state.xdg_wm_base.destroy();
+    state.surface.destroy();
+    state.pool.destroy();
+    state.buffer.destroy();
+    state.shm.release();
+    state.display.deinit();
+}
+
+fn handleBufferRelease(b: *wl.Buffer, _: *State, _: void) !void {
+    b.destroy();
+    std.log.debug("buffer {} destroyed", .{b.id});
 }
 
 fn handleXdgSurface(_: *wl.XdgSurface, state: *State, event: wl.XdgSurface.Event) !void {
@@ -132,13 +156,13 @@ fn handleXdgSurface(_: *wl.XdgSurface, state: *State, event: wl.XdgSurface.Event
                 suggestion.width,
                 suggestion.height,
                 stride,
-                .xrgb8888,
+                .argb8888,
             );
 
             try state.surface.attach(buffer, 0, 0);
             state.buffer = buffer;
             for (@as([]u32, @ptrCast(state.pool.data[0..size]))) |*pix| {
-                pix.* = 0xff0f0f0f;
+                pix.* = 0xe00f0f0f;
             }
         }
     }
@@ -185,6 +209,10 @@ fn handleDisplay(_: *wl.Display, state: *State, event: wl.Display.Event) !void {
 fn handleRegistry(_: *wl.Registry, state: *State, event: wl.Registry.Event) !void {
     switch (event) {
         .global => |gd| {
+            std.log.debug(
+                "discovered global: {:2} {s:<40} {:2}",
+                .{ gd.name, gd.interface, gd.version },
+            );
             try state.globals.put(gd.name, .{
                 .interface = try state.globals.allocator.dupe(u8, gd.interface),
                 .version = gd.version,
