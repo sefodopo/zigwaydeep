@@ -89,7 +89,13 @@ fn initWindow(state: *State) !void {
     ) catch null;
 
     state.pool = try state.shm.createPool(state.width * state.height * 4);
-    state.buffer = try state.pool.createBuffer(0, state.width, state.height, state.width * 4, .xrgb8888);
+    state.buffer = try state.pool.createBuffer(
+        0,
+        state.width,
+        state.height,
+        state.width * 4,
+        .xrgb8888,
+    );
 
     state.surface = try compositor.createSurface();
     state.xdg_surface = try xdg_wm_base.getXdgSurface(state.surface);
@@ -165,7 +171,10 @@ fn handleDisplay(_: *wl.Display, state: *State, event: wl.Display.Event) !void {
     switch (event) {
         .err => |err| {
             state.running = false;
-            std.log.err("FATAL ERROR: object_id: {}, code: {s}, message: {s}", .{ err.object_id, @tagName(err.code), err.message });
+            std.log.err(
+                "FATAL ERROR: object_id: {}, code: {s}, message: {s}",
+                .{ err.object_id, @tagName(err.code), err.message },
+            );
         },
         .delete_id => |id| {
             std.log.debug("delete_id: {}", .{id});

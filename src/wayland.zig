@@ -9,9 +9,18 @@ fn lessThan(_: void, a: u32, b: u32) std.math.Order {
 
 var next_id: u32 = 2;
 
-inline fn Dispatcher(T: type, W: type, handler: fn (*W, T, W.Event) anyerror!void) *const fn (*anyopaque, *anyopaque, u32, []const u32) anyerror!void {
+inline fn Dispatcher(
+    T: type,
+    W: type,
+    handler: fn (*W, T, W.Event) anyerror!void,
+) *const fn (*anyopaque, *anyopaque, u32, []const u32) anyerror!void {
     const _Dispatcher = struct {
-        fn dispatcher(object_ptr: *anyopaque, ptr: *anyopaque, event: u32, data: []const u32) !void {
+        fn dispatcher(
+            object_ptr: *anyopaque,
+            ptr: *anyopaque,
+            event: u32,
+            data: []const u32,
+        ) !void {
             if (W.Event == void) {
                 try handler(@ptrCast(@alignCast(object_ptr)), @ptrCast(@alignCast(ptr)), {});
                 return;
@@ -25,8 +34,16 @@ inline fn Dispatcher(T: type, W: type, handler: fn (*W, T, W.Event) anyerror!voi
 
 fn setHandlerNamespace(T: type) type {
     return struct {
-        pub fn setHandler(self: *const T, data: anytype, handler: fn (*T, @TypeOf(data), T.Event) anyerror!void) !void {
-            try self.display.addHandler(self, Dispatcher(@TypeOf(data), T, handler), @ptrCast(@constCast(data)));
+        pub fn setHandler(
+            self: *const T,
+            data: anytype,
+            handler: fn (*T, @TypeOf(data), T.Event) anyerror!void,
+        ) !void {
+            try self.display.addHandler(
+                self,
+                Dispatcher(@TypeOf(data), T, handler),
+                @ptrCast(@constCast(data)),
+            );
         }
     };
 }
@@ -164,7 +181,8 @@ pub const Display = struct {
 
         inline for (fields_info) |fi| {
             switch (@typeInfo(fi.type)) {
-                .comptime_int, .int => _ = try stream.write(std.mem.asBytes(&@as(u32, @bitCast(@field(args, fi.name))))),
+                .comptime_int, .int => _ =
+                    try stream.write(std.mem.asBytes(&@as(u32, @bitCast(@field(args, fi.name))))),
                 .array, .pointer => {
                     const field = @field(args, fi.name);
                     _ = try stream.write(std.mem.asBytes(&@as(u32, @intCast(field.len + 1))));
@@ -232,7 +250,13 @@ pub const Registry = struct {
 
     pub usingnamespace setHandlerNamespace(@This());
 
-    pub fn bind(reg: Registry, name: u32, interface: []const u8, version: u32, global: anytype) !void {
+    pub fn bind(
+        reg: Registry,
+        name: u32,
+        interface: []const u8,
+        version: u32,
+        global: anytype,
+    ) !void {
         try reg.display.sendMsg(reg.id, 0, .{ name, interface, version, global.id });
     }
 };
@@ -350,7 +374,8 @@ pub const Shm = struct {
             level: c_int,
             type: c_int,
         };
-        const buflen = @sizeOf(CMSGHDR) + ((@sizeOf(std.posix.fd_t) + @sizeOf(c_long) - 1) & ~@as(usize, @sizeOf(c_long) - 1));
+        const buflen = @sizeOf(CMSGHDR) + ((@sizeOf(std.posix.fd_t) +
+            @sizeOf(c_long) - 1) & ~@as(usize, @sizeOf(c_long) - 1));
         var buf: [buflen]u8 align(@sizeOf(CMSGHDR)) = undefined;
         for (&buf) |*d| {
             d.* = 0;
@@ -372,7 +397,10 @@ pub const Shm = struct {
         };
         const n = try std.posix.sendmsg(shm.display.conn.handle, &cmsg, std.posix.MSG.OOB);
         if (n != 17) {
-            std.log.err("Only sent {} bytes instead of {} bytes while creating wl_shm_pool", .{ n, msg.len });
+            std.log.err(
+                "Only sent {} bytes instead of {} bytes while creating wl_shm_pool",
+                .{ n, msg.len },
+            );
             return error.CouldNotSendBuffer;
         }
 
@@ -439,7 +467,14 @@ pub const ShmPool = struct {
         const id = next_id;
         next_id += 1;
 
-        try pool.display.sendMsg(pool.id, 0, .{ id, offset, width, height, stride, @intFromEnum(format) });
+        try pool.display.sendMsg(pool.id, 0, .{
+            id,
+            offset,
+            width,
+            height,
+            stride,
+            @intFromEnum(format),
+        });
 
         return .{
             .id = id,
@@ -452,7 +487,10 @@ pub const ShmPool = struct {
         std.posix.munmap(pool.data);
         std.posix.close(pool.fd);
         pool.display.writeMsg(pool.id, 1, .{}) catch |err| {
-            std.log.err("wl_shm_pool: unable to send destroy message to server, hope everything is okay: {}", .{err});
+            std.log.err(
+                "wl_shm_pool: unable to send destroy message to server, hope everything is okay: {}",
+                .{err},
+            );
         };
     }
 
