@@ -373,30 +373,18 @@ pub const Shm = struct {
             .base = @ptrCast(&msg),
             .len = 17,
         };
-        const CMSGHDR = extern struct {
-            len: usize,
-            level: c_int,
-            type: c_int,
-        };
-        const buflen = @sizeOf(CMSGHDR) + ((@sizeOf(std.posix.fd_t) +
-            @sizeOf(c_long) - 1) & ~@as(usize, @sizeOf(c_long) - 1));
-        var buf: [buflen]u8 align(@sizeOf(CMSGHDR)) = undefined;
-        for (&buf) |*d| {
-            d.* = 0;
-        }
-        var control: *CMSGHDR = @ptrCast(&buf);
-        control.len = buf.len;
-        control.level = std.posix.SOL.SOCKET;
-        control.type = 1;
-        const cmsgdata: []u8 = buf[@sizeOf(CMSGHDR)..];
-        std.mem.copyForwards(u8, cmsgdata, std.mem.asBytes(&pool.fd));
+        const cmsghdr = Cmsghdr(std.posix.fd_t).init(.{
+            .level = std.posix.SOL.SOCKET,
+            .type = 1,
+            .data = pool.fd,
+        });
         const cmsg = std.os.linux.msghdr_const{
             .name = null,
             .namelen = 0,
             .iov = &.{iov},
             .iovlen = 1,
-            .control = &buf,
-            .controllen = buf.len,
+            .control = &cmsghdr.bytes,
+            .controllen = cmsghdr.bytes.len,
             .flags = 0,
         };
         const n = try std.posix.sendmsg(shm.display.conn.handle, &cmsg, std.posix.MSG.OOB);
@@ -419,6 +407,62 @@ pub const Shm = struct {
         };
     }
 };
+
+/// This definition enables the use of Zig types with a cmsghdr structure.
+/// The oddity of this layout is that the data must be aligned to @sizeOf(usize)
+/// rather than its natural alignment.
+pub fn Cmsghdr(comptime T: type) type {
+    const Header = extern struct {
+        len: usize,
+        level: c_int,
+        type: c_int,
+    };
+
+    const data_align = @sizeOf(usize);
+    const data_offset = std.mem.alignForward(usize, @sizeOf(Header), data_align);
+
+    return extern struct {
+        const Self = @This();
+
+        bytes: [data_offset + @sizeOf(T)]u8 align(@alignOf(Header)),
+
+        pub fn init(args: struct {
+            level: c_int,
+            type: c_int,
+            data: T,
+        }) Self {
+            var self: Self = undefined;
+            self.headerPtr().* = .{
+                .len = data_offset + @sizeOf(T),
+                .level = args.level,
+                .type = args.type,
+            };
+            self.dataPtr().* = args.data;
+            return self;
+        }
+
+        // TODO: include this version if we submit a PR to add this to std
+        pub fn initNoData(args: struct {
+            level: c_int,
+            type: c_int,
+        }) Self {
+            var self: Self = undefined;
+            self.headerPtr().* = .{
+                .len = data_offset + @sizeOf(T),
+                .level = args.level,
+                .type = args.type,
+            };
+            return self;
+        }
+
+        pub fn headerPtr(self: *Self) *Header {
+            return @as(*Header, @ptrCast(self));
+        }
+        pub fn dataPtr(self: *Self) *align(data_align) T {
+            return @as(*align(data_align) T, @ptrCast(self.bytes[data_offset..]));
+        }
+    };
+}
 
 pub const ShmPool = struct {
     id: u32,
@@ -714,5 +758,64 @@ pub const XdgToplevelDecoration = struct {
 
     pub fn unsetMode(tld: @This()) !void {
         try tld.display.sendMsg(tld.id, 2, .{});
+    }
+};
+
+pub const Subcompositor = struct {
+    id: u32,
+    display: *Display,
+
+    pub fn init(display: *Display) Subcompositor {
+        const id = next_id;
+        next_id += 1;
+        return .{
+            .id = id,
+            .display = display,
+        };
+    }
+
+    pub fn destroy(s: @This()) void {
+        s.display.sendMsg(s.id, 0, .{}) catch |err|
+            std.log.err("destroy wl_subcompositor: {}", .{err});
+    }
+
+    pub fn getSubsurface(s: @This(), surface: Surface, parent: Surface) !Subsurface {
+        const id = next_id;
+        next_id += 1;
+        try s.display.sendMsg(s.id, 1, .{ id, surface.id, parent.id });
+        return .{
+            .id = id,
+            .display = s.display,
+        };
+    }
+};
+
+pub const Subsurface = struct {
+    id: u32,
+    display: *Display,
+
+    pub fn destroy(s: @This()) void {
+        s.display.sendMsg(s.id, 0, .{}) catch |err|
+            std.log.err("destroy wl_subsurface: {}", .{err});
+    }
+
+    pub fn setPosition(s: @This(), x: i32, y: i32) !void {
+        try s.display.sendMsg(s.id, 1, .{ x, y });
+    }
+
+    pub fn placeAbove(s: @This(), sibling: Surface) !void {
+        try s.display.sendMsg(s.id, 2, .{sibling.id});
+    }
+
+    pub fn placeBelow(s: @This(), sibling: Surface) !void {
+        try s.display.sendMsg(s.id, 3, .{sibling.id});
+    }
+
+    pub fn setSync(s: @This()) !void {
+        try s.display.sendMsg(s.id, 4, .{});
+    }
+
+    pub fn setDesync(s: @This()) !void {
+        try s.display.sendMsg(s.id, 5, .{});
     }
 };

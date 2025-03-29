@@ -9,6 +9,8 @@ const Global = struct {
     version: u32,
 };
 
+const PLAYER_SIZE = 30;
+
 const State = struct {
     globals: std.AutoArrayHashMap(u32, Global),
     running: bool = true,
@@ -21,6 +23,7 @@ const State = struct {
     shm: wl.Shm = undefined,
     xdg_wm_base: wl.XdgWmBase = undefined,
     xdg_decoration_manager: ?wl.XdgDecorationManager = null,
+    subcompositor: wl.Subcompositor = undefined,
 
     surface: wl.Surface = undefined,
     xdg_surface: wl.XdgSurface = undefined,
@@ -34,6 +37,12 @@ const State = struct {
     last_suggestion: ?std.meta.TagPayload(wl.XdgToplevel.Event, .configure) = null,
     bound_width: u32 = 0,
     bound_height: u32 = 0,
+
+    player_surface: wl.Surface = undefined,
+    player_subsurface: wl.Subsurface = undefined,
+    player_pool: wl.ShmPool = undefined,
+    player_buffer: wl.Buffer = undefined,
+    player_pos: struct { x: i32, y: i32 } = .{ .x = 50, .y = 50 },
 };
 
 /// The main entrypoint to the entire program!
@@ -89,6 +98,7 @@ fn initWindow(state: *State) !void {
         wl.XdgDecorationManager,
         "zxdg_decoration_manager_v1",
     ) catch null;
+    state.subcompositor = try getGlobal(state, wl.Subcompositor, "wl_subcompositor");
 
     state.pool = try state.shm.createPool(state.width * state.height * 4);
     state.buffer = try state.pool.createBuffer(
@@ -116,9 +126,27 @@ fn initWindow(state: *State) !void {
     try state.toplevel.setMinSize(400, 400);
     try state.surface.commit();
     try state.surface.attach(state.buffer, 0, 0);
+
+    state.player_pool = try state.shm.createPool(PLAYER_SIZE * PLAYER_SIZE * 4);
+    state.player_buffer = try state.player_pool.createBuffer(0, PLAYER_SIZE, PLAYER_SIZE, PLAYER_SIZE * 4, .argb8888);
+    try state.player_buffer.setHandler(state, handleBufferRelease);
+    state.player_surface = try state.compositor.createSurface();
+    state.player_subsurface = try state.subcompositor.getSubsurface(state.player_surface, state.surface);
+    try state.player_subsurface.setPosition(state.player_pos.x, state.player_pos.y);
+    try state.player_surface.commit();
+    try state.player_surface.attach(state.player_buffer, 0, 0);
+    for (@as([]u32, @ptrCast(state.player_pool.data))) |*pix| {
+        pix.* = 0xff000000;
+    }
+    try state.player_surface.commit();
 }
 
 fn deinitWindow(state: *State) void {
+    state.player_subsurface.destroy();
+    state.player_surface.destroy();
+    state.player_buffer.destroy();
+    state.player_pool.destroy();
+
     if (state.xdg_decoration) |d| d.destroy();
     if (state.xdg_decoration_manager) |d| d.destroy();
     state.toplevel.destroy();
@@ -127,6 +155,8 @@ fn deinitWindow(state: *State) void {
     state.surface.destroy();
     state.pool.destroy();
     state.buffer.destroy();
+
+    state.subcompositor.destroy();
     state.shm.release();
     state.display.deinit();
 }
