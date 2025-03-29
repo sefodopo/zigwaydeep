@@ -66,7 +66,7 @@ pub fn main() !void {
     const shm = try getGlobal(&state, &display, registry, wl.Shm, "wl_shm");
     state.shm = shm;
     const xdg_wm_base = try getGlobal(&state, &display, registry, wl.XdgWmBase, "xdg_wm_base");
-    try xdg_wm_base.setHandler(&xdg_wm_base, handleXdgWm);
+    try xdg_wm_base.setHandler(&state, handleXdgWm);
     const xdg_decor_manager: ?wl.XdgDecorationManager = getGlobal(&state, &display, registry, wl.XdgDecorationManager, "zxdg_decoration_manager_v1") catch null;
 
     const pool = try shm.createPool(state.width * state.height * 4);
@@ -95,7 +95,7 @@ pub fn main() !void {
     }
 }
 
-fn handleXdgSurface(state: *State, event: wl.XdgSurface.Event) !void {
+fn handleXdgSurface(_: *wl.XdgSurface, state: *State, event: wl.XdgSurface.Event) !void {
     if (state.last_suggestion) |suggestion| {
         // cannot access the states since we haven't copied them yet
         state.last_suggestion = null;
@@ -129,7 +129,7 @@ fn handleXdgSurface(state: *State, event: wl.XdgSurface.Event) !void {
     try state.surface.commit();
 }
 
-fn handleXdgWm(wm: *const wl.XdgWmBase, event: wl.XdgWmBase.Event) !void {
+fn handleXdgWm(wm: *const wl.XdgWmBase, _: *State, event: wl.XdgWmBase.Event) !void {
     std.log.debug("sending pong: {}", .{event.ping});
     try wm.pong(event.ping);
 }
@@ -146,7 +146,7 @@ fn getGlobal(state: *State, display: *wl.Display, registry: wl.Registry, G: type
     return error.NoSuchGlobal;
 }
 
-fn handleDisplay(state: *State, event: wl.Display.Event) !void {
+fn handleDisplay(_: *wl.Display, state: *State, event: wl.Display.Event) !void {
     switch (event) {
         .err => |err| {
             state.running = false;
@@ -158,7 +158,7 @@ fn handleDisplay(state: *State, event: wl.Display.Event) !void {
     }
 }
 
-fn handleRegistry(state: *State, event: wl.Registry.Event) !void {
+fn handleRegistry(_: *wl.Registry, state: *State, event: wl.Registry.Event) !void {
     switch (event) {
         .global => |gd| {
             try state.globals.put(gd.name, .{
@@ -172,11 +172,11 @@ fn handleRegistry(state: *State, event: wl.Registry.Event) !void {
     }
 }
 
-fn handleCallback(state: *State, _: void) !void {
+fn handleCallback(_: *wl.Callback, state: *State, _: void) !void {
     state.callback_done = true;
 }
 
-fn handleToplevel(state: *State, event: wl.XdgToplevel.Event) !void {
+fn handleToplevel(_: *wl.XdgToplevel, state: *State, event: wl.XdgToplevel.Event) !void {
     switch (event) {
         .close => state.running = false,
         .configure => |c| state.last_suggestion = c,

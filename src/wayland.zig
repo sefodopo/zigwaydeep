@@ -9,15 +9,15 @@ fn lessThan(_: void, a: u32, b: u32) std.math.Order {
 
 var next_id: u32 = 2;
 
-inline fn Dispatcher(T: type, W: type, handler: fn (T, W.Event) anyerror!void) *const fn (*anyopaque, u32, []const u32) anyerror!void {
+inline fn Dispatcher(T: type, W: type, handler: fn (*W, T, W.Event) anyerror!void) *const fn (*anyopaque, *anyopaque, u32, []const u32) anyerror!void {
     const _Dispatcher = struct {
-        fn dispatcher(ptr: *anyopaque, event: u32, data: []const u32) !void {
+        fn dispatcher(object_ptr: *anyopaque, ptr: *anyopaque, event: u32, data: []const u32) !void {
             if (W.Event == void) {
-                try handler(@ptrCast(@alignCast(ptr)), {});
+                try handler(@ptrCast(@alignCast(object_ptr)), @ptrCast(@alignCast(ptr)), {});
                 return;
             }
             const e = try W.Event.parse(event, data);
-            try handler(@ptrCast(@alignCast(ptr)), e);
+            try handler(@ptrCast(@alignCast(object_ptr)), @ptrCast(@alignCast(ptr)), e);
         }
     };
     return _Dispatcher.dispatcher;
@@ -25,8 +25,8 @@ inline fn Dispatcher(T: type, W: type, handler: fn (T, W.Event) anyerror!void) *
 
 fn setHandlerNamespace(T: type) type {
     return struct {
-        pub fn setHandler(self: *const T, data: anytype, handler: fn (@TypeOf(data), T.Event) anyerror!void) !void {
-            try self.display.addHandler(self.id, Dispatcher(@TypeOf(data), T, handler), @ptrCast(@constCast(data)));
+        pub fn setHandler(self: *const T, data: anytype, handler: fn (*T, @TypeOf(data), T.Event) anyerror!void) !void {
+            try self.display.addHandler(self, Dispatcher(@TypeOf(data), T, handler), @ptrCast(@constCast(data)));
         }
     };
 }
@@ -58,19 +58,21 @@ pub const Display = struct {
         }
     };
     const Handler = struct {
-        dispatcher: *const fn (*anyopaque, u32, []const u32) anyerror!void,
+        dispatcher: *const fn (*anyopaque, *anyopaque, u32, []const u32) anyerror!void,
+        object: *anyopaque,
         data: *anyopaque,
     };
     const ID: u32 = 1;
+    id: u32 = 1,
     conn: Stream,
     handlers: std.AutoArrayHashMap(u32, Handler),
 
     pub fn setHandler(
         disp: *Display,
         ptr: anytype,
-        handler: fn (@TypeOf(ptr), Event) anyerror!void,
+        handler: fn (*Display, @TypeOf(ptr), Event) anyerror!void,
     ) !void {
-        try disp.addHandler(ID, Dispatcher(@TypeOf(ptr), @This(), handler), ptr);
+        try disp.addHandler(disp, Dispatcher(@TypeOf(ptr), @This(), handler), ptr);
     }
 
     /// The allocator is only used temporarily and freed up before
@@ -111,7 +113,7 @@ pub const Display = struct {
         const len = header[1] >> 18;
         if (len == 2) {
             if (disp.handlers.get(header[0])) |handler| {
-                try handler.dispatcher(handler.data, header[1] & 0xffff, &.{});
+                try handler.dispatcher(handler.object, handler.data, header[1] & 0xffff, &.{});
             }
             return;
         }
@@ -124,7 +126,7 @@ pub const Display = struct {
         }
 
         if (disp.handlers.get(header[0])) |handler| {
-            try handler.dispatcher(handler.data, header[1] & 0xffff, data);
+            try handler.dispatcher(handler.object, handler.data, header[1] & 0xffff, data);
         }
     }
 
@@ -186,11 +188,15 @@ pub const Display = struct {
 
     fn addHandler(
         disp: *Display,
-        id: u32,
-        dispatcher: *const fn (*anyopaque, u32, []const u32) anyerror!void,
+        object: anytype,
+        dispatcher: *const fn (*anyopaque, *anyopaque, u32, []const u32) anyerror!void,
         data: *anyopaque,
     ) !void {
-        try disp.handlers.put(id, .{ .dispatcher = dispatcher, .data = data });
+        try disp.handlers.put(object.id, .{
+            .dispatcher = dispatcher,
+            .object = @ptrCast(@constCast(object)),
+            .data = data,
+        });
     }
 };
 
