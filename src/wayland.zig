@@ -25,6 +25,10 @@ inline fn Dispatcher(
                 try handler(@ptrCast(@alignCast(object_ptr)), @ptrCast(@alignCast(ptr)), {});
                 return;
             }
+            if (W.Event == u32) {
+                try handler(@ptrCast(@alignCast(object_ptr)), @ptrCast(@alignCast(ptr)), data[0]);
+                return;
+            }
             const e = try W.Event.parse(event, data);
             try handler(@ptrCast(@alignCast(object_ptr)), @ptrCast(@alignCast(ptr)), e);
         }
@@ -219,7 +223,7 @@ pub const Display = struct {
 };
 
 pub const Callback = struct {
-    const Event = void;
+    const Event = u32;
     id: u32,
     display: *Display,
     pub usingnamespace setHandlerNamespace(@This());
@@ -317,6 +321,13 @@ pub const Surface = struct {
 
     pub fn damage(s: Surface, x: i32, y: i32, width: i32, height: i32) !void {
         try s.display.sendMsg(s.id, 2, .{ x, y, width, height });
+    }
+
+    pub fn frame(s: Surface) !Callback {
+        const id = next_id;
+        next_id += 1;
+        try s.display.sendMsg(s.id, 3, .{id});
+        return .{ .id = id, .display = s.display };
     }
 
     pub fn commit(s: Surface) !void {

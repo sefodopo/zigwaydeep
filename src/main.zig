@@ -10,6 +10,7 @@ const Global = struct {
 };
 
 const PLAYER_SIZE = 30;
+const PLAYER_VELOCITY = 300;
 
 const State = struct {
     globals: std.AutoArrayHashMap(u32, Global),
@@ -42,7 +43,10 @@ const State = struct {
     player_subsurface: wl.Subsurface = undefined,
     player_pool: wl.ShmPool = undefined,
     player_buffer: wl.Buffer = undefined,
-    player_pos: struct { x: i32, y: i32 } = .{ .x = 50, .y = 50 },
+    player_pos: struct { x: f32, y: f32 } = .{ .x = 50, .y = 50 },
+    player_direction: enum { right, left, up, down } = .right,
+
+    last_frame_time: u32 = 0,
 };
 
 /// The main entrypoint to the entire program!
@@ -132,12 +136,14 @@ fn initWindow(state: *State) !void {
     try state.player_buffer.setHandler(state, handleBufferRelease);
     state.player_surface = try state.compositor.createSurface();
     state.player_subsurface = try state.subcompositor.getSubsurface(state.player_surface, state.surface);
-    try state.player_subsurface.setPosition(state.player_pos.x, state.player_pos.y);
+    try state.player_subsurface.setPosition(@intFromFloat(@round(state.player_pos.x)), @intFromFloat(@round(state.player_pos.y)));
     try state.player_surface.commit();
     try state.player_surface.attach(state.player_buffer, 0, 0);
     for (@as([]u32, @ptrCast(state.player_pool.data))) |*pix| {
         pix.* = 0xff000000;
     }
+    cb = try state.player_surface.frame();
+    try cb.setHandler(state, handleFrameCallback);
     try state.player_surface.commit();
 }
 
@@ -159,6 +165,44 @@ fn deinitWindow(state: *State) void {
     state.subcompositor.destroy();
     state.shm.release();
     state.display.deinit();
+}
+
+/// Time is in milliseconds
+fn handleFrameCallback(_: *wl.Callback, state: *State, time: u32) !void {
+    std.log.debug("frame callback: {}", .{time});
+    const cb = try state.player_surface.frame();
+    try cb.setHandler(state, handleFrameCallback);
+    if (state.last_frame_time == 0) {
+        state.last_frame_time = time;
+        try state.player_surface.commit();
+        return;
+    }
+    const dt: f32 = @floatFromInt(time - state.last_frame_time);
+    state.last_frame_time = time;
+    var next_pos = state.player_pos;
+    const dx: f32 = PLAYER_VELOCITY * dt / 1000;
+    switch (state.player_direction) {
+        .right => next_pos.x += dx,
+        .left => next_pos.x -= dx,
+        .up => next_pos.y -= dx,
+        .down => next_pos.y += dx,
+    }
+    const width: f32 = @floatFromInt(state.width);
+    const height: f32 = @floatFromInt(state.height);
+    if (next_pos.x < 0) {
+        next_pos.x = width - PLAYER_SIZE;
+    } else if (next_pos.x > width - PLAYER_SIZE) {
+        next_pos.x = 0;
+    }
+    if (next_pos.y < 0) {
+        next_pos.y = height - PLAYER_SIZE;
+    } else if (next_pos.y > height - PLAYER_SIZE) {
+        next_pos.y = 0;
+    }
+    state.player_pos = next_pos;
+    try state.player_subsurface.setPosition(@intFromFloat(@round(next_pos.x)), @intFromFloat(@round(next_pos.y)));
+    try state.player_surface.commit();
+    try state.surface.commit();
 }
 
 fn handleBufferRelease(b: *wl.Buffer, _: *State, _: void) !void {
@@ -254,7 +298,7 @@ fn handleRegistry(_: *wl.Registry, state: *State, event: wl.Registry.Event) !voi
     }
 }
 
-fn handleCallback(_: *wl.Callback, state: *State, _: void) !void {
+fn handleCallback(_: *wl.Callback, state: *State, _: u32) !void {
     state.callback_done = true;
 }
 
