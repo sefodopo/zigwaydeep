@@ -2,6 +2,8 @@ const std = @import("std");
 
 const wl = @import("wayland.zig");
 
+const png = @import("png.zig");
+
 const Stream = std.net.Stream;
 
 const Global = struct {
@@ -9,7 +11,7 @@ const Global = struct {
     version: u32,
 };
 
-const PLAYER_SIZE = 30;
+const PLAYER_SIZE = 32;
 const PLAYER_VELOCITY = 300;
 
 const State = struct {
@@ -138,10 +140,8 @@ fn initWindow(state: *State) !void {
     state.player_subsurface = try state.subcompositor.getSubsurface(state.player_surface, state.surface);
     try state.player_subsurface.setPosition(@intFromFloat(@round(state.player_pos.x)), @intFromFloat(@round(state.player_pos.y)));
     try state.player_surface.commit();
+    try png.pngToArgb8888(state.allocator, @embedFile("White_dot.png"), PLAYER_SIZE, PLAYER_SIZE, state.player_pool.data);
     try state.player_surface.attach(state.player_buffer, 0, 0);
-    for (@as([]u32, @ptrCast(state.player_pool.data))) |*pix| {
-        pix.* = 0xff000000;
-    }
     cb = try state.player_surface.frame();
     try cb.setHandler(state, handleFrameCallback);
     try state.player_surface.commit();

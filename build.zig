@@ -75,11 +75,7 @@ pub fn build(b: *std.Build) void {
 
     const exe_check = b.addExecutable(.{
         .name = "zigwaydeep",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/png.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = exe_mod,
     });
 
     const check = b.step("check", "Check if zigwaydeep compiles");

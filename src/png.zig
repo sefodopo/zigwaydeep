@@ -3,70 +3,78 @@ const builtin = @import("builtin");
 
 const SIGNATURE = [_]u8{ 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a };
 
-pub fn pngToArgb8888(png_datastream: []const u8, width: u32, height: u32, outBuffer: []u8) !void {
+pub fn pngToArgb8888(allocator: std.mem.Allocator, png_datastream: []const u8, width: u32, height: u32, outBuffer: []u8) !void {
     if (!std.mem.startsWith(u8, png_datastream, &SIGNATURE)) return error.NotPNGDatastream;
 
     var png_data: []const u8 = png_datastream[8..];
     const ihdr = parseChunk(IHDR, Chunk.extract(&png_data).data);
     std.log.debug("ihdr: {}", .{ihdr});
     if (ihdr.width != width or ihdr.height != height) return error.WrongDimensions;
-    // Only truecolor is supported
+    // Only truecolor with alpha is supported
     if (ihdr.color_type != 6) return error.UnsupportedPNGColorType;
-    var writer = TrueColorWriter{
-        .bitdepth = @enumFromInt(ihdr.bit_depth),
-        .outBuffer = outBuffer,
-    };
     var reader = IDATReader{
         .datastream = png_data,
         .chunk_data = &.{},
     };
-    try std.compress.zlib.decompress(reader.reader(), writer.writer());
-}
-
-const TrueColorWriter = struct {
-    const WriteError = error{TooMuchInput};
-    bitdepth: enum(u8) {
-        byte = 8,
-        word = 16,
-    },
-    outBuffer: []u8,
-    fn write(self: *TrueColorWriter, bytes: []const u8) WriteError!usize {
-        switch (self.bitdepth) {
-            .byte => {
-                if (bytes.len > self.outBuffer.len) {
-                    return error.TooMuchInput;
+    var decompressor = std.compress.zlib.decompressor(reader.reader());
+    const decompressed_stream = decompressor.reader();
+    const stride = ihdr.width * 4 * ihdr.bit_depth / 8;
+    const in_offset = ihdr.bit_depth / 2;
+    const scanlines: []u8 = try allocator.alloc(u8, stride * 2);
+    @memset(scanlines, 0);
+    defer allocator.free(scanlines);
+    for (0..ihdr.height) |y| {
+        const filter = try decompressed_stream.readByte();
+        const last_scanline = if (y % 2 == 0) scanlines[0..stride] else scanlines[stride..];
+        const scanline = if (y % 2 == 0) scanlines[stride..] else scanlines[0..stride];
+        try decompressed_stream.readNoEof(scanline);
+        switch (filter) {
+            0 => {},
+            1 => { // Sub
+                for (4..stride) |i| {
+                    scanline[i] = @truncate(@as(u9, scanline[i]) + @as(u9, scanline[i - 4]));
                 }
-                for (0..bytes.len / 4) |i| {
-                    self.outBuffer[i * 4] = bytes[i * 4 + 3];
-                    self.outBuffer[i * 4 + 1] = bytes[i * 4];
-                    self.outBuffer[i * 4 + 2] = bytes[i * 4 + 1];
-                    self.outBuffer[i * 4 + 3] = bytes[i * 4 + 2];
-                }
-                const written = bytes.len - (bytes.len % 4);
-                self.outBuffer = self.outBuffer[written..];
-                return written;
             },
-            .word => {
-                if (bytes.len / 2 > self.outBuffer.len) {
-                    return error.TooMuchInput;
+            2 => { // Up
+                for (0..stride) |i| {
+                    scanline[i] = @truncate(@as(u9, scanline[i]) + @as(u9, last_scanline[i]));
                 }
-                for (0..bytes.len / 8) |i| {
-                    self.outBuffer[i * 4] = bytes[i * 8 + 6];
-                    self.outBuffer[i * 4 + 1] = bytes[i * 8];
-                    self.outBuffer[i * 4 + 2] = bytes[i * 8 + 2];
-                    self.outBuffer[i * 4 + 3] = bytes[i * 8 + 4];
-                }
-                const written = bytes.len - (bytes.len % 8);
-                self.outBuffer = self.outBuffer[written / 2 ..];
-                return written;
             },
+            3 => { // Average
+                for (0..4) |i| {
+                    scanline[i] = @truncate(@as(u9, scanline[i]) + (@as(u9, last_scanline[i]) >> 1));
+                }
+                for (4..stride) |i| {
+                    scanline[i] = @truncate(@as(u9, scanline[i]) + (@as(u9, scanline[i - 4]) + @as(u9, last_scanline[i])) / 2);
+                }
+            },
+            4 => { // Paeth
+                std.log.debug("PNG: encountered Paeth filter, hopefully this is correct", .{});
+                for (0..4) |i| {
+                    scanline[i] = @truncate(@as(u9, scanline[i]) + @as(u9, last_scanline[i]));
+                }
+                for (4..stride) |i| {
+                    const a = @as(i16, scanline[i - 4]);
+                    const b = @as(i16, last_scanline[i]);
+                    const c = @as(i16, last_scanline[i - 4]);
+                    const p = a + b - c;
+                    const pa = @abs(p - a);
+                    const pb = @abs(p - b);
+                    const pc = @abs(p - c);
+                    const pr = if (pa <= pb and pa <= pc) a else if (pb <= pc) b else c;
+                    scanline[i] = @truncate(@as(u9, scanline[i]) + @as(u9, @intCast(pr)));
+                }
+            },
+            else => unreachable,
+        }
+        for (0..ihdr.width) |x| {
+            outBuffer[y * width * 4 + x * 4] = scanline[x * in_offset + 3];
+            outBuffer[y * width * 4 + x * 4 + 1] = scanline[x * in_offset];
+            outBuffer[y * width * 4 + x * 4 + 2] = scanline[x * in_offset + 1];
+            outBuffer[y * width * 4 + x * 4 + 3] = scanline[x * in_offset + 2];
         }
     }
-
-    fn writer(self: *TrueColorWriter) std.io.GenericWriter(*TrueColorWriter, WriteError, write) {
-        return .{ .context = self };
-    }
-};
+}
 
 const IDATReader = struct {
     const ReadError = error{InvalidPNGDatastream};
@@ -156,5 +164,8 @@ test "ihdr" {
 pub fn main() !void {
     const png_data = @embedFile("White_dot.png");
     var buffer: [32 * 32 * 4]u8 = undefined;
-    try pngToArgb8888(png_data, 32, 32, &buffer);
+    var alloc_buffer: [1024]u8 = undefined;
+    var fixed_buffer = std.heap.FixedBufferAllocator.init(&alloc_buffer);
+    const allocator = fixed_buffer.allocator();
+    try pngToArgb8888(allocator, png_data, 32, 32, &buffer);
 }
