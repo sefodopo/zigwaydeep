@@ -196,6 +196,10 @@ pub const Display = struct {
                         n += try stream.write(&.{0});
                     }
                 },
+                .float => {
+                    const value: i32 = @round(@field(args, fi.name) * 256.0);
+                    _ = try stream.write(std.mem.asBytes(&@as(u32, @bitCast(value))));
+                },
                 else => {
                     @compileError("Invalid type for arg " ++ @typeName(fi.type));
                 },
@@ -828,5 +832,95 @@ pub const Subsurface = struct {
 
     pub fn setDesync(s: @This()) !void {
         try s.display.sendMsg(s.id, 5, .{});
+    }
+};
+
+pub const Viewporter = struct {
+    id: u32,
+    display: *Display,
+
+    pub fn init(display: *Display) Viewporter {
+        const id = next_id;
+        next_id += 1;
+        return .{
+            .id = id,
+            .display = display,
+        };
+    }
+
+    pub fn destroy(vp: Viewporter) void {
+        vp.display.sendMsg(vp.id, 0, .{}) catch |err|
+            std.log.err("Viewporter destroy(): {}", .{err});
+    }
+
+    pub fn getViewport(vp: Viewporter, surface: Surface) !Viewport {
+        const id = next_id;
+        next_id += 1;
+
+        try vp.display.sendMsg(vp.id, 1, .{ id, surface.id });
+        return .{
+            .id = id,
+            .display = vp.display,
+        };
+    }
+};
+
+pub const Viewport = struct {
+    id: u32,
+    display: *Display,
+
+    pub fn destroy(vp: Viewport) void {
+        vp.display.sendMsg(vp.id, 0, .{}) catch |err|
+            std.log.err("Viewport destroy(): {}", .{err});
+    }
+
+    pub fn setSource(vp: Viewport, x: f32, y: f32, width: f32, height: f32) !void {
+        try vp.display.sendMsg(vp.id, 1, .{ x, y, width, height });
+    }
+
+    pub fn setDestination(vp: Viewport, width: i32, height: i32) !void {
+        try vp.display.sendMsg(vp.id, 2, .{ width, height });
+    }
+};
+
+pub const FractionalScaleManager = struct {
+    id: u32,
+    display: *Display,
+
+    pub fn init(display: *Display) FractionalScaleManager {
+        const id = next_id;
+        next_id += 1;
+        return .{
+            .id = id,
+            .display = display,
+        };
+    }
+
+    pub fn destroy(fsm: @This()) void {
+        fsm.display.sendMsg(fsm.id, 0, .{}) catch |err|
+            std.log.err("FractionalScaleManager destroy(): {}", .{err});
+    }
+
+    pub fn getFractionalScale(fsm: @This(), surface: Surface) !FractionalScale {
+        const id = next_id;
+        next_id += 1;
+        try fsm.display.sendMsg(fsm.id, 1, .{ id, surface.id });
+        return .{
+            .id = id,
+            .display = fsm.display,
+        };
+    }
+};
+
+pub const FractionalScale = struct {
+    id: u32,
+    display: *Display,
+
+    pub const Event = u32;
+    pub usingnamespace setHandlerNamespace(@This());
+
+    pub fn destroy(fs: @This()) void {
+        fs.display.sendMsg(fs.id, 0, .{}) catch |err|
+            std.log.err("FractionalScale destroy(): {}", .{err});
     }
 };

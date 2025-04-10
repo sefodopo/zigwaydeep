@@ -27,6 +27,7 @@ const State = struct {
     xdg_wm_base: wl.XdgWmBase = undefined,
     xdg_decoration_manager: ?wl.XdgDecorationManager = null,
     subcompositor: wl.Subcompositor = undefined,
+    fractional_scale_manager: ?wl.FractionalScaleManager = null,
 
     surface: wl.Surface = undefined,
     xdg_surface: wl.XdgSurface = undefined,
@@ -34,6 +35,7 @@ const State = struct {
     xdg_decoration: ?wl.XdgToplevelDecoration = null,
     pool: wl.ShmPool = undefined,
     buffer: wl.Buffer = undefined,
+    fractional_scale: ?wl.FractionalScale = null,
 
     width: u32 = 600,
     height: u32 = 600,
@@ -105,6 +107,11 @@ fn initWindow(state: *State) !void {
         "zxdg_decoration_manager_v1",
     ) catch null;
     state.subcompositor = try getGlobal(state, wl.Subcompositor, "wl_subcompositor");
+    state.fractional_scale_manager = getGlobal(
+        state,
+        wl.FractionalScaleManager,
+        "wp_fractional_scale_manager_v1",
+    ) catch null;
 
     state.pool = try state.shm.createPool(state.width * state.height * 4);
     state.buffer = try state.pool.createBuffer(
@@ -132,6 +139,13 @@ fn initWindow(state: *State) !void {
     try state.toplevel.setMinSize(400, 400);
     try state.surface.commit();
     try state.surface.attach(state.buffer, 0, 0);
+    state.fractional_scale = if (state.fractional_scale_manager) |fsm|
+        try fsm.getFractionalScale(state.surface)
+    else
+        null;
+    if (state.fractional_scale) |fs| {
+        try fs.setHandler(state, handlePreferredScale);
+    }
 
     state.player_pool = try state.shm.createPool(PLAYER_SIZE * PLAYER_SIZE * 4);
     state.player_buffer = try state.player_pool.createBuffer(0, PLAYER_SIZE, PLAYER_SIZE, PLAYER_SIZE * 4, .argb8888);
@@ -153,6 +167,7 @@ fn deinitWindow(state: *State) void {
     state.player_buffer.destroy();
     state.player_pool.destroy();
 
+    if (state.fractional_scale) |fs| fs.destroy();
     if (state.xdg_decoration) |d| d.destroy();
     if (state.xdg_decoration_manager) |d| d.destroy();
     state.toplevel.destroy();
@@ -162,6 +177,7 @@ fn deinitWindow(state: *State) void {
     state.pool.destroy();
     state.buffer.destroy();
 
+    if (state.fractional_scale_manager) |fsm| fsm.destroy();
     state.subcompositor.destroy();
     state.shm.release();
     state.display.deinit();
@@ -169,7 +185,7 @@ fn deinitWindow(state: *State) void {
 
 /// Time is in milliseconds
 fn handleFrameCallback(_: *wl.Callback, state: *State, time: u32) !void {
-    std.log.debug("frame callback: {}", .{time});
+    //std.log.debug("frame callback: {}", .{time});
     const cb = try state.player_surface.frame();
     try cb.setHandler(state, handleFrameCallback);
     if (state.last_frame_time == 0) {
@@ -274,8 +290,8 @@ fn handleDisplay(_: *wl.Display, state: *State, event: wl.Display.Event) !void {
                 .{ err.object_id, @tagName(err.code), err.message },
             );
         },
-        .delete_id => |id| {
-            std.log.debug("delete_id: {}", .{id});
+        .delete_id => |_| {
+            //std.log.debug("delete_id: {}", .{id});
         },
     }
 }
@@ -312,4 +328,8 @@ fn handleToplevel(_: *wl.XdgToplevel, state: *State, event: wl.XdgToplevel.Event
         },
         else => {},
     }
+}
+
+fn handlePreferredScale(_: *wl.FractionalScale, _: *State, scale: u32) !void {
+    std.log.debug("fractional_scale preferred_scale: {}/120", .{scale});
 }
